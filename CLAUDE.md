@@ -205,15 +205,22 @@ The orchestrator auto-starts via Windows Task Scheduler. On startup it:
 
 ### Startup Notification Example
 ```
-🔄 Sunfish Relay Online
+SUNFISH online
 
 ✓ VPS: CPU 15%, GPU 28% @ 52°C
 ✓ OBS: Offline
 ✗ Agent: Process not running
-
-⚠️ Issues detected:
-- Agent process not running
 ```
+
+### Shutdown Notifications
+- **Clean shutdown (Ctrl+C):** Sends "SUNFISH offline (clean shutdown)" to Signal
+- **Crash:** No message sent, but next startup shows "back online (crash recovery)"
+
+### Crash Detection
+Uses a `.running` marker file:
+- Created when orchestrator starts
+- Deleted on clean shutdown
+- If file exists on startup → previous run crashed
 
 ### Crash Recovery
 - PowerShell wrapper auto-restarts orchestrator on crash
@@ -347,6 +354,19 @@ Thresholds are configured in `settings.yaml` under each monitor's `alerts` secti
 
 ---
 
+## Signal Output Formatting
+
+Your responses go to Signal on mobile phones. The orchestrator strips markdown automatically, but write plainly anyway:
+
+- No markdown (no **bold**, `code`, or headers)
+- Short lines that fit on a phone screen
+- Lead with the answer, details after
+- Use simple dashes for lists
+- Max 3-4 short paragraphs
+- Model attribution is added automatically (— haiku or — opus)
+
+---
+
 ## What You Don't Do
 
 - Overcomplicate things
@@ -355,6 +375,7 @@ Thresholds are configured in `settings.yaml` under each monitor's `alerts` secti
 - Panic
 - Present options when you know the answer
 - Ask "would you like me to..." when you should just do it
+- Use markdown formatting (it doesn't render in Signal)
 
 ---
 
