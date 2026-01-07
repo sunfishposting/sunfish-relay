@@ -180,13 +180,15 @@ def handle_message_tiered(
         (response, model_used)
     """
     # Signal formatting instructions
-    signal_format = """FORMAT FOR SIGNAL (mobile phone):
-- Short lines, no markdown (no **bold** or `code`)
-- No ASCII art or tables
-- Use emoji sparingly for status (✓ ✗ ⚠️)
+    signal_format = """CRITICAL - FORMAT FOR SIGNAL (mobile phone):
+- NO MARKDOWN. No **bold**, no `code`, no headers with #
+- Plain text only. Use [OK] [!!] [ALERT] for status
+- Short lines that fit on a phone screen
+- No ASCII art, no tables
 - Lead with the answer, details after
-- If listing items, use simple bullets (•)
-- Max 3-4 short paragraphs"""
+- Simple dashes for lists (- item)
+- Max 3-4 short paragraphs
+VIOLATION OF THESE RULES WILL BREAK THE UI."""
 
     # Build prompt for Haiku (read-only observation)
     haiku_prompt = f"""{context}
@@ -404,8 +406,8 @@ class Orchestrator:
             self.memory.add_event(f"Responded to: {message_text[:50]}...")
 
             # Send response with model attribution
-            model_tag = "🔵" if model_used == 'haiku' else "🟣"
-            tagged_response = f"{response}\n\n{model_tag} {model_used}"
+            model_tag = "[haiku]" if model_used == 'haiku' else "[opus]"
+            tagged_response = f"{response}\n\n{model_tag}"
             self.signal.send_message(group_id, tagged_response)
 
     async def _smart_monitoring_check(self):
@@ -455,7 +457,7 @@ Review the system state. Is everything okay?
 - If there's a concern worth flagging, explain briefly (2-3 lines max).
 - If immediate action is needed, say "ALERT: <issue>"
 
-FORMAT: This goes to Signal on a phone. Short lines, no markdown, no tables."""
+CRITICAL FORMAT: Signal on phone. NO MARKDOWN (no **bold** or `code`). Plain text only. Short lines."""
 
         response = call_claude_code(
             prompt=prompt,
@@ -469,18 +471,21 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown, no tables."""
 
         # Log observation
         if 'all clear' in response_lower:
-            logger.debug("Haiku: All clear")
+            logger.info("Haiku: All clear")
+            # Don't spam Signal with "all clear" messages
             return
 
-        # Alert or concern - notify humans
+        # Alert - high priority
         if response_lower.startswith('alert:'):
             self.memory.add_event(f"Haiku alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"⚠️ {response}\n\n🔵 haiku")
+                self.signal.send_message(group_id, f"[ALERT] {response}\n\n[haiku]")
         else:
-            # Non-critical observation
+            # Non-critical observation - still useful info, send to Signal
             self.memory.add_event(f"Haiku observation: {response[:200]}")
             logger.info(f"Haiku observation: {response}")
+            for group_id in self.signal.allowed_group_ids:
+                self.signal.send_message(group_id, f"[STATUS] {response}\n\n[haiku]")
 
     async def _verification_check(self, status: dict):
         """Verify that a recent Opus fix worked."""
@@ -514,7 +519,7 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
         # Alert if fix failed
         if 'alert:' in response.lower():
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"⚠️ {response}\n\n🔵 haiku")
+                self.signal.send_message(group_id, f"[ALERT] {response}\n\n[haiku]")
 
     async def _startup_check(self):
         """
@@ -534,11 +539,11 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
         status = self.health.get_all_status()
         alerts = self.health.get_all_alerts()
 
-        # Build startup message (plain text - Signal doesn't render markdown)
+        # Build startup message (plain text, ASCII-safe)
         if is_crash_recovery:
-            lines = ["🔄 SUNFISH RELAY BACK ONLINE (crash recovery)\n"]
+            lines = ["[SUNFISH] Back online (crash recovery)\n"]
         else:
-            lines = ["🔄 SUNFISH RELAY ONLINE\n"]
+            lines = ["[SUNFISH] Online\n"]
 
         # Check each monitor
         for name, monitor in self.health.monitors.items():
@@ -546,17 +551,17 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
                 line = monitor.get_status_line()
                 monitor_status = status.get(name, {})
                 if monitor_status.get('healthy', True):
-                    lines.append(f"✓ {line}")
+                    lines.append(f"[OK] {line}")
                 else:
-                    lines.append(f"✗ {line}")
+                    lines.append(f"[!!] {line}")
             except Exception as e:
-                lines.append(f"✗ {name}: error ({e})")
+                lines.append(f"[!!] {name}: error ({e})")
 
         # Add any alerts
         if alerts:
-            lines.append("\n⚠️ Issues detected:")
+            lines.append("\n[ALERT] Issues detected:")
             for alert in alerts:
-                lines.append(f"  • {alert}")
+                lines.append(f"  - {alert}")
 
         message = "\n".join(lines)
 
@@ -701,7 +706,7 @@ FORMAT FOR SIGNAL (phone):
         self.memory.add_event(f"Auto-recovery attempted: {response[:200]}")
 
         for group_id in self.signal.allowed_group_ids:
-            self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}\n\n🟣 opus")
+            self.signal.send_message(group_id, f"[AUTO-RECOVERY]\n{response}\n\n[opus]")
 
         # Schedule verification
         self.smart_monitor.schedule_verification()
