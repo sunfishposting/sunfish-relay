@@ -43,9 +43,10 @@ from health import HealthAggregator
 from memory import MemoryManager
 from smart_monitoring import SmartMonitor
 
-# Configure logging
+# Configure logging - DEBUG level shows poll details
+log_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level, logging.INFO),
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -71,14 +72,32 @@ class SignalCLINative:
     def receive_messages(self) -> list[dict]:
         """Poll for new messages using signal-cli."""
         try:
+            cmd = [self.signal_cli_path, "-u", self.phone_number, "receive", "--output=json", "-t", "5"]
+            logger.debug(f"[POLL] Running: {' '.join(cmd)}")
+
             result = subprocess.run(
-                [self.signal_cli_path, "-u", self.phone_number, "receive", "--json"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=30
             )
+
+            # Log any stderr from signal-cli
+            if result.stderr:
+                logger.warning(f"[POLL] signal-cli stderr: {result.stderr[:200]}")
+
+            # Log return code
+            if result.returncode != 0:
+                logger.warning(f"[POLL] signal-cli returned {result.returncode}")
+
             messages = []
-            for line in result.stdout.strip().split('\n'):
+            raw_output = result.stdout.strip()
+
+            # Debug: show raw output length
+            if raw_output:
+                logger.info(f"[POLL] Received {len(raw_output)} bytes, parsing...")
+
+            for line in raw_output.split('\n'):
                 if line:
                     try:
                         msg = json.loads(line)
@@ -87,16 +106,27 @@ class SignalCLINative:
                         env = msg.get('envelope', msg)
                         data_msg = env.get('dataMessage', {})
                         text = data_msg.get('message', '')
-                        group = data_msg.get('groupInfo', {}).get('groupId', 'DM')
+                        group_info = data_msg.get('groupInfo', {})
+                        group = group_info.get('groupId', 'DM')
+                        sender = env.get('source', 'unknown')
+
                         if text:
-                            logger.debug(f"[RAW] group={group[:20]}... text={text[:50]}")
-                    except json.JSONDecodeError:
+                            logger.info(f"[RAW MSG] from={sender} group={group[:20] if group != 'DM' else 'DM'}... text={text[:100]}")
+                        else:
+                            # Log non-text messages (receipts, typing, etc)
+                            msg_type = 'receipt' if env.get('receiptMessage') else 'typing' if env.get('typingMessage') else 'other'
+                            logger.debug(f"[RAW {msg_type.upper()}] from={sender}")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"[POLL] JSON decode error: {e} - line: {line[:100]}")
                         continue
+
+            logger.debug(f"[POLL] Parsed {len(messages)} messages")
             return messages
         except subprocess.TimeoutExpired:
+            logger.warning("[POLL] signal-cli timed out")
             return []
         except Exception as e:
-            logger.error(f"Failed to receive messages: {e}")
+            logger.error(f"[POLL] Failed to receive messages: {e}")
             return []
 
     def send_message(self, group_id: str, message: str):
@@ -166,16 +196,19 @@ def call_claude_code(
     Returns:
         Claude's response text
     """
+    # Log model usage - OPUS calls are expensive!
+    if model == 'opus':
+        logger.warning(f"[$$$ OPUS $$$] Calling Opus with tools: {allowed_tools}")
+    else:
+        logger.info(f"[CLAUDE] Calling {model}")
+
     try:
         cmd = [
             _claude_path, "-p", prompt,
             "--output-format", "text",
             "--allowedTools", allowed_tools,
+            "--model", model,  # Always pass model explicitly
         ]
-
-        # Add model flag if not default
-        if model and model != 'opus':
-            cmd.extend(["--model", model])
 
         result = subprocess.run(
             cmd,
@@ -248,9 +281,10 @@ Otherwise, answer the question using only read operations.
     )
 
     # Check for escalation
+    logger.info(f"[HAIKU RESPONSE] {response[:200]}...")
     if response.strip().upper().startswith('ESCALATE:'):
         reason = response.split(':', 1)[1].strip() if ':' in response else 'Action required'
-        logger.info(f"Escalating to Opus: {reason}")
+        logger.info(f"[$$$ OPUS CALL $$$] Escalating because: {reason}")
 
         # Build prompt for Opus (full access)
         opus_prompt = f"""{context}

@@ -32,6 +32,10 @@ logs/
 # Runtime markers
 .running
 
+# Ops log (local state, not code)
+ops-log.md
+ops-log.tmp
+
 # Docker
 .docker/
 

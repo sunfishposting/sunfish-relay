@@ -12,11 +12,17 @@ Designed to stay small (~50 lines) while preserving knowledge.
 """
 
 import logging
+import threading
+import tempfile
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 import re
 
 logger = logging.getLogger(__name__)
+
+# Thread lock for file operations
+_file_lock = threading.Lock()
 
 DEFAULT_OPS_LOG = """# Ops Log
 
@@ -76,19 +82,29 @@ class MemoryManager:
             logger.info(f"Created ops-log.md at {self.ops_log_path}")
 
     def read(self) -> str:
-        """Read the current ops log."""
-        try:
-            return self.ops_log_path.read_text()
-        except Exception as e:
-            logger.error(f"Failed to read ops-log: {e}")
-            return DEFAULT_OPS_LOG
+        """Read the current ops log (thread-safe)."""
+        with _file_lock:
+            try:
+                return self.ops_log_path.read_text(encoding='utf-8')
+            except Exception as e:
+                logger.error(f"Failed to read ops-log: {e}")
+                return DEFAULT_OPS_LOG
 
     def write(self, content: str):
-        """Write the entire ops log."""
-        try:
-            self.ops_log_path.write_text(content)
-        except Exception as e:
-            logger.error(f"Failed to write ops-log: {e}")
+        """Write the entire ops log (atomic, thread-safe)."""
+        with _file_lock:
+            try:
+                # Atomic write: write to temp file, then rename
+                # This prevents corruption if write is interrupted
+                temp_path = self.ops_log_path.with_suffix('.tmp')
+                temp_path.write_text(content, encoding='utf-8')
+
+                # On Windows, need to remove target first
+                if self.ops_log_path.exists():
+                    self.ops_log_path.unlink()
+                temp_path.rename(self.ops_log_path)
+            except Exception as e:
+                logger.error(f"Failed to write ops-log: {e}")
 
     def get_context_for_claude(self) -> str:
         """Get the ops log, auto-trimming old events first."""
