@@ -60,9 +60,9 @@ class HealthAggregator:
         statuses = {}
         for name, monitor in self.monitors.items():
             try:
-                logger.info(f"[HEALTH] Checking {name}...")
+                logger.debug(f"[HEALTH] Checking {name}...")
                 statuses[name] = monitor.get_status()
-                logger.info(f"[HEALTH] {name} done")
+                logger.debug(f"[HEALTH] {name} done")
             except Exception as e:
                 logger.error(f"Error getting status from {name}: {e}")
                 statuses[name] = {'healthy': False, 'error': str(e)}

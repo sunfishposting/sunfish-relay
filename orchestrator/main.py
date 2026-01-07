@@ -75,7 +75,7 @@ class SignalCLINative:
             # Remove -t flag - it may be causing hangs on Windows
             # Let signal-cli return immediately with whatever's available
             cmd = [self.signal_cli_path, "-u", self.phone_number, "--output", "json", "receive"]
-            logger.info(f"[POLL] Starting receive...")
+            logger.debug("[POLL] Starting receive...")
 
             result = subprocess.run(
                 cmd,
@@ -97,7 +97,7 @@ class SignalCLINative:
 
             # Debug: show raw output length
             if raw_output:
-                logger.info(f"[POLL] Received {len(raw_output)} bytes, parsing...")
+                logger.debug(f"[POLL] Received {len(raw_output)} bytes")
 
             for line in raw_output.split('\n'):
                 if line:
@@ -259,18 +259,19 @@ def handle_message_tiered(
 - Max 3-4 short paragraphs
 VIOLATION OF THESE RULES WILL BREAK THE UI."""
 
-    # Build prompt for Haiku (read-only observation)
+    # Build prompt for Haiku (read-only, conversational)
     haiku_prompt = f"""{context}
 
-## Request
+## Message from user
 "{message}"
 
 ---
-You are in READ-ONLY mode. You can observe, check status, read logs, and report.
-If this request requires ACTION (editing files, restarting services, fixing issues),
-respond with exactly: "ESCALATE: <reason>"
+PERSONALITY: You're a friendly DevOps assistant. Be conversational, casual, helpful.
+- Actually engage with what they said - acknowledge their message
+- If they're chatting, chat back. If they ask a question, answer it.
+- Check the "Recent Conversation" section above for context on what you've been discussing
 
-Otherwise, answer the question using only read operations.
+ESCALATION: You have read-only access. If they're asking you to DO something (edit files, restart services, fix issues), respond with exactly: "ESCALATE: <what they want done>"
 
 {signal_format}"""
 
@@ -545,9 +546,9 @@ You have full system access. Help with this request.
     async def _smart_monitoring_check(self):
         """Event-driven monitoring - only invoke Claude when interesting."""
         # Get current status from all monitors
-        logger.info("[MONITOR] Starting health check...")
+        logger.debug("[MONITOR] Health check running...")
         raw_status = self.health.get_all_status()
-        logger.info("[MONITOR] Health check complete")
+        logger.debug("[MONITOR] Health check complete")
         flat_status = self.smart_monitor.flatten_status(raw_status)
 
         # Check if we should invoke Claude
