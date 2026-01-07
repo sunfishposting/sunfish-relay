@@ -43,9 +43,10 @@ logger = logging.getLogger(__name__)
 class SignalCLINative:
     """Native signal-cli client."""
 
-    def __init__(self):
+    def __init__(self, signal_cli_path: str = "signal-cli"):
         self.phone_number: Optional[str] = None
         self.allowed_group_ids: set[str] = set()
+        self.signal_cli_path = signal_cli_path
 
     def configure(self, phone_number: str, allowed_group_ids: list[str]):
         self.phone_number = phone_number
@@ -55,7 +56,7 @@ class SignalCLINative:
         """Poll for new messages using signal-cli."""
         try:
             result = subprocess.run(
-                ["signal-cli", "-u", self.phone_number, "receive", "--json"],
+                [self.signal_cli_path, "-u", self.phone_number, "receive", "--json"],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -81,7 +82,7 @@ class SignalCLINative:
                 message = message[:3900] + "\n\n[truncated]"
 
             subprocess.run(
-                ["signal-cli", "-u", self.phone_number, "send", "-g", group_id, "-m", message],
+                [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "-m", message],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -108,6 +109,10 @@ class SignalCLINative:
 # Claude Code Integration (Tiered Models)
 # =============================================================================
 
+# Global claude path (set by Orchestrator on init)
+_claude_path = "claude"
+
+
 def call_claude_code(
     prompt: str,
     working_dir: Path,
@@ -130,7 +135,7 @@ def call_claude_code(
     """
     try:
         cmd = [
-            "claude", "-p", prompt,
+            _claude_path, "-p", prompt,
             "--output-format", "text",
             "--allowedTools", allowed_tools,
         ]
@@ -263,11 +268,18 @@ class Orchestrator:
     """Main orchestrator that ties everything together."""
 
     def __init__(self, config: dict):
+        global _claude_path
+
         self.config = config
         self.project_path = get_project_path(config)
 
+        # Set executable paths from config (for Windows)
+        paths = config.get('paths', {})
+        signal_cli_path = paths.get('signal_cli', 'signal-cli')
+        _claude_path = paths.get('claude', 'claude')
+
         # Initialize components
-        self.signal = SignalCLINative()
+        self.signal = SignalCLINative(signal_cli_path=signal_cli_path)
         self.signal.configure(
             phone_number=config['signal']['phone_number'],
             allowed_group_ids=config['signal']['allowed_group_ids']

@@ -2,6 +2,14 @@
 # Copy to settings.yaml and fill in your values
 
 # =============================================================================
+# Executable Paths (Windows)
+# =============================================================================
+# Full paths to executables - required on Windows where PATH isn't inherited
+paths:
+  signal_cli: "C:\\signal-cli\\signal-cli-0.13.22\\bin\\signal-cli.bat"
+  claude: "C:\\Users\\Administrator\\AppData\\Roaming\\npm\\claude.cmd"
+
+# =============================================================================
 # Signal Configuration
 # =============================================================================
 signal:
