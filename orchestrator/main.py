@@ -8,7 +8,7 @@ Architecture:
 - Smart monitor (proactive): Event-driven Claude invocation
 - Memory manager: Maintains ops-log.md for persistent context
 - Monitor plugins: Extensible system monitoring (VPS, OBS, Agent, etc.)
-- Tiered models: Haiku observes, Opus acts
+- Tiered models: Sonnet observes, Opus acts
 """
 
 import asyncio
@@ -236,70 +236,76 @@ def call_claude_code(
 
 def handle_message_tiered(
     message: str,
-    context: str,
+    status_lines: list[str],
+    conversation: list[dict],
+    ops_log: str,
     project_path: Path
 ) -> tuple[str, str]:
     """
     Handle a message using tiered model approach.
 
-    1. Try Haiku with read-only tools
-    2. If Haiku needs action, escalate to Opus
+    1. Try Sonnet with read-only tools
+    2. If Sonnet needs action, escalate to Opus
+
+    CLAUDE.md (auto-loaded) provides personality and system knowledge.
+    Prompt provides: message, conversation, status, and ops-log (working memory).
 
     Returns:
         (response, model_used)
     """
-    # Signal formatting instructions
-    signal_format = """CRITICAL - FORMAT FOR SIGNAL (mobile phone):
-- NO MARKDOWN. No **bold**, no `code`, no headers with #
-- Plain text only. Use [OK] [!!] [ALERT] for status
-- Short lines that fit on a phone screen
-- No ASCII art, no tables
-- Lead with the answer, details after
-- Simple dashes for lists (- item)
-- Max 3-4 short paragraphs
-VIOLATION OF THESE RULES WILL BREAK THE UI."""
+    # Format recent conversation
+    convo_text = ""
+    if conversation:
+        recent = conversation[-5:]  # Last 5 messages for context
+        convo_text = "\n".join([f"- {m['text'][:100]}" for m in recent])
 
-    # Build prompt for Haiku (read-only, conversational)
-    haiku_prompt = f"""{context}
+    # Format live status
+    status_text = "\n".join([f"- {line}" for line in status_lines])
 
-## Message from user
-"{message}"
+    # Prompt with full operational context
+    sonnet_prompt = f"""USER: "{message}"
+
+RECENT CONVERSATION:
+{convo_text if convo_text else "(none)"}
+
+LIVE STATUS:
+{status_text if status_text else "(no monitors active)"}
+
+OPS LOG:
+{ops_log}
 
 ---
-PERSONALITY: You're a friendly DevOps assistant. Be conversational, casual, helpful.
-- Actually engage with what they said - acknowledge their message
-- If they're chatting, chat back. If they ask a question, answer it.
-- Check the "Recent Conversation" section above for context on what you've been discussing
+Read-only mode. If this needs ACTION (edit, restart, fix), respond: ESCALATE: <reason>"""
 
-ESCALATION: You have read-only access. If they're asking you to DO something (edit files, restart services, fix issues), respond with exactly: "ESCALATE: <what they want done>"
-
-{signal_format}"""
-
-    # Try Haiku first
+    # Try Sonnet first
     response = call_claude_code(
-        prompt=haiku_prompt,
+        prompt=sonnet_prompt,
         working_dir=project_path,
-        model='haiku',
+        model='sonnet',
         allowed_tools='Read,Glob,Grep',
         timeout=60
     )
 
     # Check for escalation
-    logger.info(f"[HAIKU RESPONSE] {response[:200]}...")
+    logger.info(f"[SONNET] {response[:200]}...")
     if response.strip().upper().startswith('ESCALATE:'):
         reason = response.split(':', 1)[1].strip() if ':' in response else 'Action required'
-        logger.info(f"[$$$ OPUS CALL $$$] Escalating because: {reason}")
+        logger.info(f"[$$$ OPUS $$$] Escalating: {reason}")
 
-        # Build prompt for Opus (full access)
-        opus_prompt = f"""{context}
+        # Opus prompt - same structure, full access
+        opus_prompt = f"""USER: "{message}"
 
-## Request
-"{message}"
+RECENT CONVERSATION:
+{convo_text if convo_text else "(none)"}
+
+LIVE STATUS:
+{status_text if status_text else "(no monitors active)"}
+
+OPS LOG:
+{ops_log}
 
 ---
-You have full system access. Execute the requested action.
-
-{signal_format}"""
+Full access. Handle this request."""
 
         response = call_claude_code(
             prompt=opus_prompt,
@@ -310,7 +316,7 @@ You have full system access. Execute the requested action.
         )
         return response, 'opus'
 
-    return response, 'haiku'
+    return response, 'sonnet'
 
 
 # =============================================================================
@@ -476,7 +482,7 @@ class Orchestrator:
             if len(self.message_buffer) > self.buffer_size:
                 self.message_buffer = self.message_buffer[-self.buffer_size:]
 
-            # Check for @opus direct trigger (bypasses Haiku)
+            # Check for @opus direct trigger (bypasses Sonnet)
             direct_opus = 'opus' in message_text.lower()
 
             # Check trigger: mentions array OR literal trigger word
@@ -489,27 +495,37 @@ class Orchestrator:
 
             logger.info(f"[TRIGGERED] {'@opus direct' if direct_opus else 'via ' + ('mention' if has_mention else 'trigger word')}")
 
-            # Build context
-            context = self._build_context()
+            # Get context for prompt
+            status_lines = self._get_status_lines()
+            ops_log = self.memory.get_context_for_claude()
 
             # Route to appropriate model
             if direct_opus:
-                # Direct Opus access - bypass Haiku entirely
+                # Direct Opus access - bypass Sonnet entirely
                 logger.info("[$$$ OPUS $$$] Direct Opus request")
-                signal_format = """FORMAT FOR SIGNAL (mobile):
-- NO MARKDOWN. No **bold**, no `code`, no # headers
-- Plain text only. Short lines.
-- Lead with the answer, details after."""
 
-                prompt = f"""{context}
+                # Format conversation
+                convo_text = ""
+                if self.message_buffer:
+                    recent = self.message_buffer[-5:]
+                    convo_text = "\n".join([f"- {m['text'][:100]}" for m in recent])
 
-## Request
-"{message_text}"
+                status_text = "\n".join([f"- {line}" for line in status_lines])
+
+                prompt = f"""USER: "{message_text}"
+
+RECENT CONVERSATION:
+{convo_text if convo_text else "(none)"}
+
+LIVE STATUS:
+{status_text if status_text else "(no monitors active)"}
+
+OPS LOG:
+{ops_log}
 
 ---
-You have full system access. Help with this request.
+Full access. Handle this request."""
 
-{signal_format}"""
                 response = call_claude_code(
                     prompt=prompt,
                     working_dir=self.project_path,
@@ -521,9 +537,9 @@ You have full system access. Help with this request.
                 self.smart_monitor.schedule_verification()
 
             elif self.use_tiered_models:
-                # Tiered: Haiku first, escalate to Opus if needed
+                # Tiered: Sonnet first, escalate to Opus if needed
                 response, model_used = handle_message_tiered(
-                    message_text, context, self.project_path
+                    message_text, status_lines, self.message_buffer, ops_log, self.project_path
                 )
                 logger.info(f"Handled by {model_used}")
 
@@ -532,7 +548,17 @@ You have full system access. Help with this request.
                     self.smart_monitor.schedule_verification()
             else:
                 # Legacy: always use Opus
-                prompt = f"{context}\n\n## Request\n\"{message_text}\""
+                status_text = "\n".join([f"- {line}" for line in status_lines])
+                prompt = f"""USER: "{message_text}"
+
+LIVE STATUS:
+{status_text}
+
+OPS LOG:
+{ops_log}
+
+---
+Full access. Handle this request."""
                 response = call_claude_code(prompt, self.project_path)
                 model_used = 'opus'
 
@@ -567,37 +593,35 @@ You have full system access. Help with this request.
             await self._verification_check(flat_status)
 
         elif reason in ("significant_change", "scheduled_check"):
-            # Let Haiku observe and report if needed
-            await self._haiku_observation(reason, changed_metrics, flat_status)
+            # Let Sonnet observe and report if needed
+            await self._sonnet_observation(reason, changed_metrics)
 
-    async def _haiku_observation(self, reason: str, changed_metrics: list[str], status: dict):
-        """Have Haiku observe the system and report if needed."""
+    async def _sonnet_observation(self, reason: str, changed_metrics: list[str]):
+        """Have Sonnet observe the system and report if needed."""
         change_summary = self.smart_monitor.get_change_summary(changed_metrics)
+        status_lines = self._get_status_lines()
+        status_text = "\n".join([f"- {line}" for line in status_lines])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""You are monitoring a livestream system. A check was triggered.
-
-Trigger reason: {reason}
+        prompt = f"""MONITORING TRIGGER: {reason}
 {change_summary}
 
-Current status:
-{self.health.get_status_summary()}
+LIVE STATUS:
+{status_text}
 
-Ops log:
+OPS LOG:
 {ops_log}
 
 ---
-Review the system state. Is everything okay?
-- If all clear, respond with just: "All clear."
-- If there's a concern worth flagging, explain briefly (2-3 lines max).
-- If immediate action is needed, say "ALERT: <issue>"
-
-CRITICAL FORMAT: Signal on phone. NO MARKDOWN (no **bold** or `code`). Plain text only. Short lines."""
+Review. Respond with one of:
+- "All clear." (if nothing concerning)
+- Brief concern (2-3 lines if worth noting)
+- "ALERT: <issue>" (if critical)"""
 
         response = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
-            model='haiku',
+            model='sonnet',
             allowed_tools='Read,Glob,Grep',
             timeout=60
         )
@@ -606,45 +630,44 @@ CRITICAL FORMAT: Signal on phone. NO MARKDOWN (no **bold** or `code`). Plain tex
 
         # Log observation
         if 'all clear' in response_lower:
-            logger.info("Haiku: All clear")
-            # Don't spam Signal with "all clear" messages
+            logger.info("Sonnet: All clear")
             return
 
         # Alert - high priority
         if response_lower.startswith('alert:'):
-            self.memory.add_event(f"Haiku alert: {response[:200]}")
+            self.memory.add_event(f"Alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"🚨 {response}\n\n— haiku")
+                self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
         else:
-            # Non-critical observation - still useful info, send to Signal
-            self.memory.add_event(f"Haiku observation: {response[:200]}")
-            logger.info(f"Haiku observation: {response}")
+            # Non-critical observation
+            self.memory.add_event(f"Observation: {response[:200]}")
+            logger.info(f"Sonnet observation: {response}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"{response}\n\n— haiku")
+                self.signal.send_message(group_id, f"{response}\n\n— sonnet")
 
     async def _verification_check(self, status: dict):
         """Verify that a recent Opus fix worked."""
+        status_lines = self._get_status_lines()
+        status_text = "\n".join([f"- {line}" for line in status_lines])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""A fix was recently applied. Verify if it worked.
+        prompt = f"""VERIFICATION CHECK: Recent fix applied.
 
-Current status:
-{self.health.get_status_summary()}
+LIVE STATUS:
+{status_text}
 
-Recent ops log:
+OPS LOG:
 {ops_log}
 
 ---
-Check if the recent fix resolved the issue.
-- If fixed, respond: "Fix verified: <brief summary>"
-- If issue persists, respond: "ALERT: Fix did not hold - <details>"
-
-FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
+Did the fix work?
+- "Fix verified: <summary>" if resolved
+- "ALERT: Fix failed - <details>" if issue persists"""
 
         response = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
-            model='haiku',
+            model='sonnet',
             allowed_tools='Read,Glob,Grep',
             timeout=60
         )
@@ -654,7 +677,7 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
         # Alert if fix failed
         if 'alert:' in response.lower():
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"🚨 {response}\n\n— haiku")
+                self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
 
     async def _startup_check(self):
         """
@@ -709,7 +732,7 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
             self.memory.add_event("CRASH RECOVERY - orchestrator restarted after unexpected shutdown")
             self.memory.add_active_issue("Investigate recent crash - check logs/orchestrator.log")
 
-            # Have Haiku analyze what might have caused the crash
+            # Have Sonnet analyze what might have caused the crash
             await self._analyze_crash()
         else:
             self.memory.add_event("System startup - orchestrator online")
@@ -753,7 +776,7 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
             logger.warning(f"Could not remove running marker: {e}")
 
     async def _analyze_crash(self):
-        """Have Haiku analyze what might have caused the crash."""
+        """Have Sonnet analyze what might have caused the crash."""
         logger.info("Analyzing potential crash cause...")
 
         # Read orchestrator log if it exists
@@ -769,40 +792,32 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
 
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""The system just restarted after what appears to be a crash or unexpected shutdown.
+        prompt = f"""CRASH RECOVERY: System restarted unexpectedly.
 
-## Recent Ops Log
+OPS LOG:
 {ops_log}
 
-## Orchestrator Log (last 50 lines)
-{log_tail if log_tail else "Log file not available"}
+LOG TAIL (last 50 lines):
+{log_tail if log_tail else "(no log file)"}
 
 ---
-Analyze what might have caused the crash:
-1. Look for errors or warnings in the logs
-2. Check if any monitors showed problems before shutdown
-3. Note any patterns or suspicious activity
-
-Respond concisely with:
-- Likely cause (if identifiable)
-- Recommended action (if any)
-- "Unknown cause" if can't determine
-
-This will be logged to ops-log.md for reference."""
+Analyze briefly:
+- Likely cause (or "Unknown")
+- Recommended action (if any)"""
 
         response = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
-            model='haiku',
+            model='sonnet',
             allowed_tools='Read,Glob,Grep',
             timeout=60
         )
 
         # Log the analysis
-        logger.info(f"Crash analysis result: {response}")
+        logger.info(f"Crash analysis: {response}")
         self.memory.add_event(f"Crash analysis: {response[:250]}")
 
-        # If Haiku found something actionable, add to history
+        # If Sonnet found something actionable, add to history
         if 'unknown' not in response.lower():
             self.memory.add_to_history(f"Crash on {datetime.now().strftime('%m/%d')}: {response[:150]}")
 
@@ -813,21 +828,24 @@ This will be logged to ops-log.md for reference."""
         """
         logger.info("Attempting auto-recovery...")
 
-        context = self._build_context()
-        prompt = f"""{context}
+        status_lines = self._get_status_lines()
+        status_text = "\n".join([f"- {line}" for line in status_lines])
+        alerts_text = "\n".join([f"- {a}" for a in alerts])
+        ops_log = self.memory.get_context_for_claude()
 
-## Startup Recovery
+        prompt = f"""AUTO-RECOVERY: System restarted with issues.
 
-The system just restarted and detected these issues:
-{chr(10).join(f'• {a}' for a in alerts)}
+ALERTS:
+{alerts_text}
 
-Assess the situation and attempt to fix critical issues.
+LIVE STATUS:
+{status_text}
 
-FORMAT FOR SIGNAL (phone):
-- Short lines, no markdown
-- Lead with what you did
-- Then brief status
-- Max 3-4 lines"""
+OPS LOG:
+{ops_log}
+
+---
+Full access. Fix critical issues and report what you did."""
 
         response = call_claude_code(
             prompt=prompt,
@@ -838,7 +856,7 @@ FORMAT FOR SIGNAL (phone):
         )
 
         # Log and notify
-        self.memory.add_event(f"Auto-recovery attempted: {response[:200]}")
+        self.memory.add_event(f"Auto-recovery: {response[:200]}")
 
         for group_id in self.signal.allowed_group_ids:
             self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}\n\n— opus")
@@ -846,27 +864,15 @@ FORMAT FOR SIGNAL (phone):
         # Schedule verification
         self.smart_monitor.schedule_verification()
 
-    def _build_context(self) -> str:
-        """Build context string for Claude."""
-        status_summary = self.health.get_status_summary()
-        ops_log = self.memory.get_context_for_claude()
-
-        conversation = ""
-        if self.message_buffer:
-            recent = self.message_buffer[-10:]
-            conversation = "\n".join([f"- {m['text']}" for m in recent])
-
-        return f"""You are the DevOps administrator for a 24/7 AI livestream.
-
-{status_summary}
-
----
-## Operational Memory
-{ops_log}
----
-
-## Recent Conversation
-{conversation}"""
+    def _get_status_lines(self) -> list[str]:
+        """Get current status as a list of one-liner strings."""
+        lines = []
+        for name, monitor in self.health.monitors.items():
+            try:
+                lines.append(monitor.get_status_line())
+            except Exception as e:
+                lines.append(f"{name}: error ({e})")
+        return lines
 
     def _update_status_in_memory(self):
         """Update the status section in ops-log.md."""

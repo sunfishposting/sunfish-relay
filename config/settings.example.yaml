@@ -45,7 +45,7 @@ project_path: "."
 # =============================================================================
 
 # How often to check system health (seconds)
-health_check_interval: 60
+health_check_interval: 10
 
 # Send proactive alerts when thresholds exceeded
 proactive_alerts: true
@@ -132,7 +132,7 @@ smart_monitoring:
 # Model Configuration
 # =============================================================================
 
-# Use tiered models (Haiku observes, Opus acts)
+# Use tiered models (Sonnet observes, Opus acts)
 # Set to false to always use Opus (more expensive but simpler)
 use_tiered_models: true
 
