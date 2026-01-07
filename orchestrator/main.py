@@ -179,6 +179,15 @@ def handle_message_tiered(
     Returns:
         (response, model_used)
     """
+    # Signal formatting instructions
+    signal_format = """FORMAT FOR SIGNAL (mobile phone):
+- Short lines, no markdown (no **bold** or `code`)
+- No ASCII art or tables
+- Use emoji sparingly for status (✓ ✗ ⚠️)
+- Lead with the answer, details after
+- If listing items, use simple bullets (•)
+- Max 3-4 short paragraphs"""
+
     # Build prompt for Haiku (read-only observation)
     haiku_prompt = f"""{context}
 
@@ -190,7 +199,9 @@ You are in READ-ONLY mode. You can observe, check status, read logs, and report.
 If this request requires ACTION (editing files, restarting services, fixing issues),
 respond with exactly: "ESCALATE: <reason>"
 
-Otherwise, answer the question using only read operations."""
+Otherwise, answer the question using only read operations.
+
+{signal_format}"""
 
     # Try Haiku first
     response = call_claude_code(
@@ -214,7 +225,8 @@ Otherwise, answer the question using only read operations."""
 
 ---
 You have full system access. Execute the requested action.
-Be concise in your response (this goes to Signal on mobile)."""
+
+{signal_format}"""
 
         response = call_claude_code(
             prompt=opus_prompt,
@@ -386,12 +398,15 @@ class Orchestrator:
                 # Legacy: always use Opus
                 prompt = f"{context}\n\n## Request\n\"{message_text}\""
                 response = call_claude_code(prompt, self.project_path)
+                model_used = 'opus'
 
             # Log event
             self.memory.add_event(f"Responded to: {message_text[:50]}...")
 
-            # Send response
-            self.signal.send_message(group_id, response)
+            # Send response with model attribution
+            model_tag = "🔵" if model_used == 'haiku' else "🟣"
+            tagged_response = f"{response}\n\n{model_tag} {model_used}"
+            self.signal.send_message(group_id, tagged_response)
 
     async def _smart_monitoring_check(self):
         """Event-driven monitoring - only invoke Claude when interesting."""
@@ -437,10 +452,10 @@ Ops log:
 ---
 Review the system state. Is everything okay?
 - If all clear, respond with just: "All clear."
-- If there's a concern worth flagging, explain briefly.
+- If there's a concern worth flagging, explain briefly (2-3 lines max).
 - If immediate action is needed, say "ALERT: <issue>"
 
-Be concise."""
+FORMAT: This goes to Signal on a phone. Short lines, no markdown, no tables."""
 
         response = call_claude_code(
             prompt=prompt,
@@ -461,7 +476,7 @@ Be concise."""
         if response_lower.startswith('alert:'):
             self.memory.add_event(f"Haiku alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"⚠️ {response}")
+                self.signal.send_message(group_id, f"⚠️ {response}\n\n🔵 haiku")
         else:
             # Non-critical observation
             self.memory.add_event(f"Haiku observation: {response[:200]}")
@@ -484,7 +499,7 @@ Check if the recent fix resolved the issue.
 - If fixed, respond: "Fix verified: <brief summary>"
 - If issue persists, respond: "ALERT: Fix did not hold - <details>"
 
-Be concise."""
+FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
 
         response = call_claude_code(
             prompt=prompt,
@@ -499,7 +514,7 @@ Be concise."""
         # Alert if fix failed
         if 'alert:' in response.lower():
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"⚠️ {response}")
+                self.signal.send_message(group_id, f"⚠️ {response}\n\n🔵 haiku")
 
     async def _startup_check(self):
         """
@@ -664,10 +679,15 @@ This will be logged to ops-log.md for reference."""
 ## Startup Recovery
 
 The system just restarted and detected these issues:
-{chr(10).join(f'- {a}' for a in alerts)}
+{chr(10).join(f'• {a}' for a in alerts)}
 
 Assess the situation and attempt to fix critical issues.
-Be concise in your response - it will be sent to Signal."""
+
+FORMAT FOR SIGNAL (phone):
+- Short lines, no markdown
+- Lead with what you did
+- Then brief status
+- Max 3-4 lines"""
 
         response = call_claude_code(
             prompt=prompt,
@@ -681,7 +701,7 @@ Be concise in your response - it will be sent to Signal."""
         self.memory.add_event(f"Auto-recovery attempted: {response[:200]}")
 
         for group_id in self.signal.allowed_group_ids:
-            self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}")
+            self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}\n\n🟣 opus")
 
         # Schedule verification
         self.smart_monitor.schedule_verification()
