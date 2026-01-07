@@ -529,7 +529,9 @@ You have full system access. Help with this request.
     async def _smart_monitoring_check(self):
         """Event-driven monitoring - only invoke Claude when interesting."""
         # Get current status from all monitors
+        logger.info("[MONITOR] Starting health check...")
         raw_status = self.health.get_all_status()
+        logger.info("[MONITOR] Health check complete")
         flat_status = self.smart_monitor.flatten_status(raw_status)
 
         # Check if we should invoke Claude
