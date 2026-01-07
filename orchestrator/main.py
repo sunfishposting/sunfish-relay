@@ -406,8 +406,7 @@ class Orchestrator:
             self.memory.add_event(f"Responded to: {message_text[:50]}...")
 
             # Send response with model attribution
-            model_tag = "[haiku]" if model_used == 'haiku' else "[opus]"
-            tagged_response = f"{response}\n\n{model_tag}"
+            tagged_response = f"{response}\n\n— {model_used}"
             self.signal.send_message(group_id, tagged_response)
 
     async def _smart_monitoring_check(self):
@@ -479,13 +478,13 @@ CRITICAL FORMAT: Signal on phone. NO MARKDOWN (no **bold** or `code`). Plain tex
         if response_lower.startswith('alert:'):
             self.memory.add_event(f"Haiku alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"[ALERT] {response}\n\n[haiku]")
+                self.signal.send_message(group_id, f"🚨 {response}\n\n— haiku")
         else:
             # Non-critical observation - still useful info, send to Signal
             self.memory.add_event(f"Haiku observation: {response[:200]}")
             logger.info(f"Haiku observation: {response}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"[STATUS] {response}\n\n[haiku]")
+                self.signal.send_message(group_id, f"{response}\n\n— haiku")
 
     async def _verification_check(self, status: dict):
         """Verify that a recent Opus fix worked."""
@@ -519,7 +518,7 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
         # Alert if fix failed
         if 'alert:' in response.lower():
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"[ALERT] {response}\n\n[haiku]")
+                self.signal.send_message(group_id, f"🚨 {response}\n\n— haiku")
 
     async def _startup_check(self):
         """
@@ -539,11 +538,11 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
         status = self.health.get_all_status()
         alerts = self.health.get_all_alerts()
 
-        # Build startup message (plain text, ASCII-safe)
+        # Build startup message
         if is_crash_recovery:
-            lines = ["[SUNFISH] Back online (crash recovery)\n"]
+            lines = ["🌞🐠 Back online (crash recovery)\n"]
         else:
-            lines = ["[SUNFISH] Online\n"]
+            lines = ["🌞🐠 Online\n"]
 
         # Check each monitor
         for name, monitor in self.health.monitors.items():
@@ -551,15 +550,15 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
                 line = monitor.get_status_line()
                 monitor_status = status.get(name, {})
                 if monitor_status.get('healthy', True):
-                    lines.append(f"[OK] {line}")
+                    lines.append(f"✓ {line}")
                 else:
-                    lines.append(f"[!!] {line}")
+                    lines.append(f"✗ {line}")
             except Exception as e:
-                lines.append(f"[!!] {name}: error ({e})")
+                lines.append(f"✗ {name}: error ({e})")
 
         # Add any alerts
         if alerts:
-            lines.append("\n[ALERT] Issues detected:")
+            lines.append("\n🚨 Issues detected:")
             for alert in alerts:
                 lines.append(f"  - {alert}")
 
@@ -706,7 +705,7 @@ FORMAT FOR SIGNAL (phone):
         self.memory.add_event(f"Auto-recovery attempted: {response[:200]}")
 
         for group_id in self.signal.allowed_group_ids:
-            self.signal.send_message(group_id, f"[AUTO-RECOVERY]\n{response}\n\n[opus]")
+            self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}\n\n— opus")
 
         # Schedule verification
         self.smart_monitor.schedule_verification()
