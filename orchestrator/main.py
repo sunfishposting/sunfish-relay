@@ -109,11 +109,11 @@ class SignalCLINative:
                 message = message[:3900] + "\n\n[truncated]"
 
             # Use --message-from-stdin to properly handle newlines on Windows
+            # Encode as UTF-8 bytes to avoid Windows cp1252 encoding issues
             result = subprocess.run(
                 [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "--message-from-stdin"],
-                input=message,
+                input=message.encode('utf-8'),
                 capture_output=True,
-                text=True,
                 timeout=30
             )
             if result.returncode == 0:
