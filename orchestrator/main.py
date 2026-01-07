@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -22,6 +23,21 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+
+
+def strip_markdown(text: str) -> str:
+    """Remove markdown formatting for plain text output."""
+    # Bold: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    # Italic: *text* or _text_
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'\1', text)
+    # Code: `text`
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    # Headers: ### text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    return text
 
 from health import HealthAggregator
 from memory import MemoryManager
@@ -65,7 +81,15 @@ class SignalCLINative:
             for line in result.stdout.strip().split('\n'):
                 if line:
                     try:
-                        messages.append(json.loads(line))
+                        msg = json.loads(line)
+                        messages.append(msg)
+                        # Debug: log raw incoming messages
+                        env = msg.get('envelope', msg)
+                        data_msg = env.get('dataMessage', {})
+                        text = data_msg.get('message', '')
+                        group = data_msg.get('groupInfo', {}).get('groupId', 'DM')
+                        if text:
+                            logger.debug(f"[RAW] group={group[:20]}... text={text[:50]}")
                     except json.JSONDecodeError:
                         continue
             return messages
@@ -76,21 +100,25 @@ class SignalCLINative:
             return []
 
     def send_message(self, group_id: str, message: str):
-        """Send a message to a group."""
+        """Send a message to a group via stdin (handles newlines properly on Windows)."""
         try:
+            # Strip markdown formatting for plain text
+            message = strip_markdown(message)
+
             if len(message) > 4000:
                 message = message[:3900] + "\n\n[truncated]"
 
+            # Use --message-from-stdin to properly handle newlines on Windows
             result = subprocess.run(
-                [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "-m", message],
+                [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "--message-from-stdin"],
+                input=message,
                 capture_output=True,
                 text=True,
                 timeout=30
             )
             if result.returncode == 0:
-                # Show preview of what was sent
-                preview = message[:80].replace('\n', ' ')
-                logger.info(f"[-> SIGNAL] {preview}...")
+                # Show full message in logs
+                logger.info(f"[-> SIGNAL]\n{message}")
             else:
                 logger.error(f"[-> SIGNAL FAILED] {result.stderr}")
         except Exception as e:
@@ -375,9 +403,17 @@ class Orchestrator:
 
             parsed = self.signal.extract_group_message(msg)
             if not parsed:
+                # Log why it was skipped
+                data_msg = envelope.get('dataMessage', {})
+                group_info = data_msg.get('groupInfo', {})
+                group_id = group_info.get('groupId', 'none')
+                text = data_msg.get('message', '')
+                if text:
+                    logger.info(f"[SKIP] group={group_id[:20] if group_id else 'DM'}... not in allowed list or no text")
                 continue
 
             group_id, sender, message_text = parsed
+            logger.info(f"[<- SIGNAL] from {sender}: {message_text}")
 
             # Buffer all messages for context
             self.message_buffer.append({'sender': sender, 'text': message_text})
@@ -386,9 +422,10 @@ class Orchestrator:
 
             # Check trigger word
             if self.trigger_word and self.trigger_word not in message_text.lower():
+                logger.info(f"[SKIP] no trigger word '{self.trigger_word}' in message")
                 continue
 
-            logger.info(f"[<- SIGNAL] @triggered: {message_text[:60]}...")
+            logger.info(f"[TRIGGERED] processing request")
 
             # Build context
             context = self._build_context()
