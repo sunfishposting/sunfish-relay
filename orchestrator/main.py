@@ -81,13 +81,18 @@ class SignalCLINative:
             if len(message) > 4000:
                 message = message[:3900] + "\n\n[truncated]"
 
-            subprocess.run(
+            result = subprocess.run(
                 [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "-m", message],
                 capture_output=True,
                 text=True,
                 timeout=30
             )
-            logger.info("Message sent")
+            if result.returncode == 0:
+                # Show preview of what was sent
+                preview = message[:80].replace('\n', ' ')
+                logger.info(f"[-> SIGNAL] {preview}...")
+            else:
+                logger.error(f"[-> SIGNAL FAILED] {result.stderr}")
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
 
@@ -381,7 +386,7 @@ class Orchestrator:
             if self.trigger_word and self.trigger_word not in message_text.lower():
                 continue
 
-            logger.info("Processing triggered message")
+            logger.info(f"[<- SIGNAL] @triggered: {message_text[:60]}...")
 
             # Build context
             context = self._build_context()
@@ -540,9 +545,9 @@ FORMAT: This goes to Signal on a phone. Short lines, no markdown."""
 
         # Build startup message
         if is_crash_recovery:
-            lines = ["🌞🐠 Back online (crash recovery)\n"]
+            lines = ["SUNFISH back online (crash recovery)\n"]
         else:
-            lines = ["🌞🐠 Online\n"]
+            lines = ["SUNFISH online\n"]
 
         # Check each monitor
         for name, monitor in self.health.monitors.items():
