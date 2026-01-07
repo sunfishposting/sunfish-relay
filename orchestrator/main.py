@@ -350,8 +350,10 @@ class Orchestrator:
 
                 await asyncio.sleep(self.poll_interval)
         finally:
-            # Clean shutdown - remove marker
+            # Clean shutdown - notify and remove marker
             logger.info("Shutting down...")
+            for group_id in self.signal.allowed_group_ids:
+                self.signal.send_message(group_id, "SUNFISH offline (clean shutdown)")
             self._clear_running_marker()
             self.memory.add_event("Clean shutdown")
 
