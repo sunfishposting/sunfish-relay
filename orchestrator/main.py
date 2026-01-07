@@ -385,7 +385,7 @@ class Orchestrator:
         self.buffer_size = config.get('context_buffer_size', 30)
 
     async def run(self):
-        """Main run loop."""
+        """Main entry point - runs signal and monitoring as independent tasks."""
         logger.info("Starting Sunfish Relay Orchestrator")
         logger.info(f"Project path: {self.project_path}")
         logger.info(f"Trigger word: '{self.trigger_word}' (empty = all messages)")
@@ -402,18 +402,12 @@ class Orchestrator:
         self._set_running_marker()
 
         try:
-            while True:
-                try:
-                    # Process incoming messages
-                    await self._process_messages()
-
-                    # Smart monitoring check
-                    await self._smart_monitoring_check()
-
-                except Exception as e:
-                    logger.error(f"Error in main loop: {e}")
-
-                await asyncio.sleep(self.poll_interval)
+            # Run signal polling and health monitoring as INDEPENDENT tasks
+            # They don't block each other
+            await asyncio.gather(
+                self._signal_loop(),
+                self._monitoring_loop(),
+            )
         finally:
             # Clean shutdown - notify and remove marker
             logger.info("Shutting down...")
@@ -421,6 +415,28 @@ class Orchestrator:
                 self.signal.send_message(group_id, "SUNFISH offline (clean shutdown)")
             self._clear_running_marker()
             self.memory.add_event("Clean shutdown")
+
+    async def _signal_loop(self):
+        """Independent loop for Signal message polling."""
+        logger.info("[SIGNAL LOOP] Started")
+        while True:
+            try:
+                await self._process_messages()
+            except Exception as e:
+                logger.error(f"[SIGNAL LOOP] Error: {e}")
+            await asyncio.sleep(self.poll_interval)
+
+    async def _monitoring_loop(self):
+        """Independent loop for health monitoring."""
+        logger.info("[MONITOR LOOP] Started")
+        # Now independent from signal polling - can run frequently
+        health_check_interval = self.config.get('health_check_interval', 10)
+        while True:
+            try:
+                await self._smart_monitoring_check()
+            except Exception as e:
+                logger.error(f"[MONITOR LOOP] Error: {e}")
+            await asyncio.sleep(health_check_interval)
 
     async def _process_messages(self):
         """Process incoming Signal messages."""
