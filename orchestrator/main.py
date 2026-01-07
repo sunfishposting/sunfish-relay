@@ -154,17 +154,18 @@ class SignalCLINative:
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
 
-    def extract_group_message(self, envelope: dict) -> Optional[tuple[str, str, str]]:
-        """Extract group ID, sender, and message text."""
+    def extract_group_message(self, envelope: dict) -> Optional[tuple[str, str, str, list]]:
+        """Extract group ID, sender, message text, and mentions."""
         env = envelope.get('envelope', envelope)
         data_message = env.get('dataMessage', {})
         group_info = data_message.get('groupInfo', {})
         group_id = group_info.get('groupId')
         message = data_message.get('message')
         sender = env.get('source')
+        mentions = data_message.get('mentions', [])
 
         if group_id and message and group_id in self.allowed_group_ids:
-            return (group_id, sender, message)
+            return (group_id, sender, message, mentions)
         return None
 
 
@@ -446,26 +447,62 @@ class Orchestrator:
                     logger.info(f"[SKIP] group={group_id[:20] if group_id else 'DM'}... not in allowed list or no text")
                 continue
 
-            group_id, sender, message_text = parsed
+            group_id, sender, message_text, mentions = parsed
             logger.info(f"[<- SIGNAL] from {sender}: {message_text}")
+            if mentions:
+                logger.info(f"[MENTIONS] {len(mentions)} mention(s) detected")
 
             # Buffer all messages for context
             self.message_buffer.append({'sender': sender, 'text': message_text})
             if len(self.message_buffer) > self.buffer_size:
                 self.message_buffer = self.message_buffer[-self.buffer_size:]
 
-            # Check trigger word
-            if self.trigger_word and self.trigger_word not in message_text.lower():
-                logger.info(f"[SKIP] no trigger word '{self.trigger_word}' in message")
+            # Check for @opus direct trigger (bypasses Haiku)
+            direct_opus = 'opus' in message_text.lower()
+
+            # Check trigger: mentions array OR literal trigger word
+            has_mention = len(mentions) > 0
+            has_trigger_word = self.trigger_word and self.trigger_word in message_text.lower()
+
+            if not has_mention and not has_trigger_word:
+                logger.info(f"[SKIP] no mention and no trigger word '{self.trigger_word}'")
                 continue
 
-            logger.info(f"[TRIGGERED] processing request")
+            logger.info(f"[TRIGGERED] {'@opus direct' if direct_opus else 'via ' + ('mention' if has_mention else 'trigger word')}")
 
             # Build context
             context = self._build_context()
 
-            # Handle with tiered models or Opus only
-            if self.use_tiered_models:
+            # Route to appropriate model
+            if direct_opus:
+                # Direct Opus access - bypass Haiku entirely
+                logger.info("[$$$ OPUS $$$] Direct Opus request")
+                signal_format = """FORMAT FOR SIGNAL (mobile):
+- NO MARKDOWN. No **bold**, no `code`, no # headers
+- Plain text only. Short lines.
+- Lead with the answer, details after."""
+
+                prompt = f"""{context}
+
+## Request
+"{message_text}"
+
+---
+You have full system access. Help with this request.
+
+{signal_format}"""
+                response = call_claude_code(
+                    prompt=prompt,
+                    working_dir=self.project_path,
+                    model='opus',
+                    allowed_tools='Read,Edit,Write,Bash,Glob,Grep',
+                    timeout=120
+                )
+                model_used = 'opus'
+                self.smart_monitor.schedule_verification()
+
+            elif self.use_tiered_models:
+                # Tiered: Haiku first, escalate to Opus if needed
                 response, model_used = handle_message_tiered(
                     message_text, context, self.project_path
                 )

@@ -2,9 +2,11 @@
 
 Quick reference for signal-cli patterns used in this project.
 
-## Key Insight
+## Key Insights
 
-`--output json` is a **GLOBAL flag** - it goes BEFORE the subcommand, not after.
+**1. `--output json` is a GLOBAL flag** - goes BEFORE the subcommand, not after.
+
+**2. Mentions use placeholder characters** - When someone @mentions in Signal, the message text contains U+FFFC (Object Replacement Character) and the actual mention data is in the `mentions` array.
 
 ```bash
 # CORRECT
@@ -34,6 +36,27 @@ Output format (one JSON object per line):
 ```json
 {"envelope":{"source":"+1234567890","timestamp":1234567890,"dataMessage":{"message":"Hello","groupInfo":{"groupId":"base64..."}}}}
 ```
+
+## Mentions
+
+When someone uses Signal's @mention feature, the message text contains a placeholder character (U+FFFC), NOT the literal "@Name" text.
+
+```json
+{
+  "dataMessage": {
+    "message": "￼ what's the status?",
+    "mentions": [
+      {"uuid": "abc-123-...", "start": 0, "length": 1}
+    ]
+  }
+}
+```
+
+- `uuid` - The mentioned user's Signal UUID
+- `start` - Position in message text (usually 0 for @Name at start)
+- `length` - Always 1 (the U+FFFC placeholder)
+
+**To detect mentions:** Check if `mentions` array is non-empty, don't look for literal "@" text.
 
 ## Send Messages
 
