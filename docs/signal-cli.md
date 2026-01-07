@@ -88,6 +88,7 @@ Requires Java 21+.
 | `unrecognized argument: --json` | Flag in wrong position | Use `--output json` BEFORE subcommand |
 | `Config file is in use` | Another signal-cli running | Kill other instance or use daemon mode |
 | `java.lang.UnsupportedClassVersionError` | Java too old | Install Java 21+ |
+| Receive hangs for 30+ seconds | `-t` timeout flag may not work on Windows | Remove `-t` flag, use Python timeout instead |
 
 ## Links
 

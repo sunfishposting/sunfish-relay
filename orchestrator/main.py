@@ -72,14 +72,16 @@ class SignalCLINative:
     def receive_messages(self) -> list[dict]:
         """Poll for new messages using signal-cli."""
         try:
-            cmd = [self.signal_cli_path, "-u", self.phone_number, "--output", "json", "receive", "-t", "5"]
-            logger.debug(f"[POLL] Running: {' '.join(cmd)}")
+            # Remove -t flag - it may be causing hangs on Windows
+            # Let signal-cli return immediately with whatever's available
+            cmd = [self.signal_cli_path, "-u", self.phone_number, "--output", "json", "receive"]
+            logger.info(f"[POLL] Starting receive...")
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=15  # Safety net - signal-cli should return in <5s
             )
 
             # Log any stderr from signal-cli
@@ -123,7 +125,7 @@ class SignalCLINative:
             logger.debug(f"[POLL] Parsed {len(messages)} messages")
             return messages
         except subprocess.TimeoutExpired:
-            logger.warning("[POLL] signal-cli timed out")
+            logger.warning("[POLL] signal-cli timed out (hung?) - will retry next cycle")
             return []
         except Exception as e:
             logger.error(f"[POLL] Failed to receive messages: {e}")
