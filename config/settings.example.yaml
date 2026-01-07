@@ -1,0 +1,31 @@
+# Sunfish Relay Configuration
+# Copy this to settings.yaml and fill in your values
+
+signal:
+  # Your phone number in international format (e.g., +14155551234)
+  phone_number: "+1XXXXXXXXXX"
+
+  # Mode: "native" (local signal-cli) or "docker" (REST API)
+  # Native mode is simpler for local Mac development
+  mode: "native"
+
+  # Group IDs allowed to send commands
+  # Native: signal-cli -u +1XXXXXXXXXX listGroups
+  # Docker: curl http://localhost:8080/v1/groups/+1XXXXXXXXXX
+  allowed_group_ids:
+    - "GROUP_ID_HERE"
+
+# Path to your streaming agent project (where prompt.yaml lives)
+# Claude Code will have full access to read/edit files here
+project_path: "./stream-project"
+
+# Polling interval in seconds
+poll_interval: 2
+
+obs:
+  # Set to true to enable OBS integration
+  enabled: false
+  host: "localhost"
+  port: 4455
+  # OBS WebSocket password (set in OBS -> Tools -> WebSocket Server Settings)
+  password: ""

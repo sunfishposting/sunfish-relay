@@ -1,0 +1,8 @@
+# Core dependencies
+pyyaml>=6.0
+
+# OBS integration (optional - only if obs.enabled=true)
+obsws-python>=1.6.0
+
+# Only needed for Docker/REST API mode
+requests>=2.31.0

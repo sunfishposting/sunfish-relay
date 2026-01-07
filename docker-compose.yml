@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-api
+    environment:
+      - MODE=native
+      # Disable debug logging to prevent phone number leakage in logs
+      - LOG_LEVEL=WARN
+    volumes:
+      - ./signal-data:/home/.local/share/signal-cli
+    networks:
+      - internal
+    restart: unless-stopped
+    # No ports exposed - only accessible via internal network
+
+  orchestrator:
+    build: ./orchestrator
+    container_name: orchestrator
+    environment:
+      - SIGNAL_API_URL=http://signal-api:8080
+      - OBS_HOST=host.docker.internal
+      - OBS_PORT=4455
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount your streaming project for Claude Code to edit
+      - ./stream-project:/app/stream-project
+      # Mount config
+      - ./config:/app/config
+    networks:
+      - internal
+    depends_on:
+      - signal-api
+    restart: unless-stopped
+    # No ports exposed
+
+networks:
+  internal:
+    driver: bridge
+    # Internal network - not accessible from host or internet

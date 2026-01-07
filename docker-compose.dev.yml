@@ -1,0 +1,13 @@
+# DEVELOPMENT ONLY - Exposes ports for debugging
+#
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# WARNING: Never use this in production. The exposed port allows
+# anyone on your network to send messages as your Signal account.
+
+version: '3.8'
+
+services:
+  signal-api:
+    ports:
+      - "127.0.0.1:8080:8080"  # Localhost only, but still exposed

@@ -1,0 +1,37 @@
+# Signal data - NEVER commit (contains encryption keys and phone number)
+signal-data/
+
+# Config with secrets
+config/settings.yaml
+
+# Development override - should never be in production
+docker-compose.override.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Stream project files (if sensitive)
+stream-project/*.env
+stream-project/secrets/
