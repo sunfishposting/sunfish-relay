@@ -25,6 +25,22 @@ You're the sysadmin for a 24/7 AI livestream operation. This document is your co
 
 ---
 
+## Documentation Lookup (IMPORTANT)
+
+**Your training data is stale** - at least a year behind. NEVER trust training data for CLI flags, API syntax, or library patterns. They change.
+
+**Lookup order:**
+1. **Check `docs/` first** - Contains verified patterns we've already figured out
+2. **If not in docs/, use context7 MCP** - `mcp__context7__resolve-library-id` then `mcp__context7__get-library-docs`
+3. **Update `docs/` after** - Cache what you learned so we don't pay to rediscover it
+
+**Why this matters:** Spinning up agents to search docs wastes time, money, and context. The `docs/` folder is a lean cache of hard-won knowledge.
+
+**Current docs:**
+- `docs/signal-cli.md` - signal-cli patterns (global flags, receive/send syntax)
+
+---
+
 ## System Architecture
 
 ```
@@ -113,6 +129,8 @@ sunfish-relay/
 ├── ops-log.md             # YOUR MEMORY - rolling operational log
 ├── config/
 │   └── settings.yaml      # Configuration (phone, groups, thresholds)
+├── docs/                  # REFERENCE DOCS - read when troubleshooting
+│   └── signal-cli.md      # signal-cli patterns and gotchas
 ├── orchestrator/
 │   ├── main.py            # Main orchestrator loop
 │   ├── health.py          # Health aggregator
@@ -122,6 +140,8 @@ sunfish-relay/
 └── scripts/
     └── start-windows.ps1  # Startup script with auto-restart
 ```
+
+**Reference docs in `docs/`** - Read these when troubleshooting specific systems. They contain gotchas and patterns that aren't obvious from code alone.
 
 ### ops-log.md (Your Memory)
 
