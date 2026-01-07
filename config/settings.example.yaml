@@ -100,8 +100,9 @@ monitors:
 smart_monitoring:
   enabled: true
 
-  # Scheduled deep check interval (seconds) - baseline coverage
-  scheduled_check_interval: 1800  # 30 minutes
+  # Scheduled deep check interval (seconds) - set to 0 to disable
+  # Not needed if event-driven monitoring is sufficient
+  scheduled_check_interval: 0  # disabled (was 1800 = 30 min)
 
   # How long to wait after Opus acts before verifying fix
   post_action_delay: 120  # 2 minutes

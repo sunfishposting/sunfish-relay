@@ -193,8 +193,8 @@ class SmartMonitor:
             self.last_haiku_check = now
             return True, "verify_fix", []
 
-        # 3. Scheduled deep check
-        if now - self.last_haiku_check > self.scheduled_check_interval:
+        # 3. Scheduled deep check (disabled if interval is 0)
+        if self.scheduled_check_interval > 0 and now - self.last_haiku_check > self.scheduled_check_interval:
             self.last_haiku_check = now
             return True, "scheduled_check", []
 
