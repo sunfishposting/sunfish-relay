@@ -29,6 +29,9 @@ ENV/
 *.log
 logs/
 
+# Runtime markers
+.running
+
 # Docker
 .docker/
 

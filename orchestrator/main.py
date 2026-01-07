@@ -311,21 +311,30 @@ class Orchestrator:
         # Initial status update
         self._update_status_in_memory()
 
-        # Startup notification
+        # Startup notification (checks for crash before setting marker)
         await self._startup_check()
 
-        while True:
-            try:
-                # Process incoming messages
-                await self._process_messages()
+        # Set running marker AFTER crash detection
+        self._set_running_marker()
 
-                # Smart monitoring check
-                await self._smart_monitoring_check()
+        try:
+            while True:
+                try:
+                    # Process incoming messages
+                    await self._process_messages()
 
-            except Exception as e:
-                logger.error(f"Error in main loop: {e}")
+                    # Smart monitoring check
+                    await self._smart_monitoring_check()
 
-            await asyncio.sleep(self.poll_interval)
+                except Exception as e:
+                    logger.error(f"Error in main loop: {e}")
+
+                await asyncio.sleep(self.poll_interval)
+        finally:
+            # Clean shutdown - remove marker
+            logger.info("Shutting down...")
+            self._clear_running_marker()
+            self.memory.add_event("Clean shutdown")
 
     async def _process_messages(self):
         """Process incoming Signal messages."""
@@ -450,13 +459,13 @@ Be concise."""
 
         # Alert or concern - notify humans
         if response_lower.startswith('alert:'):
-            self.memory.add_event(f"Haiku alert: {response[:100]}")
+            self.memory.add_event(f"Haiku alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
                 self.signal.send_message(group_id, f"⚠️ {response}")
         else:
             # Non-critical observation
-            self.memory.add_event(f"Haiku observation: {response[:100]}")
-            logger.info(f"Haiku observation: {response[:100]}")
+            self.memory.add_event(f"Haiku observation: {response[:200]}")
+            logger.info(f"Haiku observation: {response}")
 
     async def _verification_check(self, status: dict):
         """Verify that a recent Opus fix worked."""
@@ -485,7 +494,7 @@ Be concise."""
             timeout=60
         )
 
-        self.memory.add_event(f"Verification: {response[:100]}")
+        self.memory.add_event(f"Verification: {response[:200]}")
 
         # Alert if fix failed
         if 'alert:' in response.lower():
@@ -510,11 +519,11 @@ Be concise."""
         status = self.health.get_all_status()
         alerts = self.health.get_all_alerts()
 
-        # Build startup message
+        # Build startup message (plain text - Signal doesn't render markdown)
         if is_crash_recovery:
-            lines = ["🔄 **Sunfish Relay Back Online** (crash recovery)\n"]
+            lines = ["🔄 SUNFISH RELAY BACK ONLINE (crash recovery)\n"]
         else:
-            lines = ["🔄 **Sunfish Relay Online**\n"]
+            lines = ["🔄 SUNFISH RELAY ONLINE\n"]
 
         # Check each monitor
         for name, monitor in self.health.monitors.items():
@@ -530,9 +539,9 @@ Be concise."""
 
         # Add any alerts
         if alerts:
-            lines.append("\n⚠️ **Issues detected:**")
+            lines.append("\n⚠️ Issues detected:")
             for alert in alerts:
-                lines.append(f"- {alert}")
+                lines.append(f"  • {alert}")
 
         message = "\n".join(lines)
 
@@ -558,25 +567,35 @@ Be concise."""
         """
         Detect if this startup is recovering from a crash.
 
-        Checks:
-        - Recent events section for signs of abnormal shutdown
-        - Time since last event (if very recent, likely a crash/restart)
+        Uses a marker file approach:
+        - .running file exists on startup = previous instance didn't shut down cleanly
+        - Clean shutdown removes the file
         """
-        # Check for crash indicators in recent events
-        recent_section = self.memory._extract_section_content('events')
+        marker_file = self.project_path / ".running"
 
-        # If the last event was very recent and wasn't a clean shutdown, likely a crash
-        # Also check if there's no "shutdown" or "stopping" message
-        if recent_section:
-            lines = recent_section.strip().split('\n')
-            if lines:
-                last_event = lines[0].lower()
-                # If last event suggests normal operation (not shutdown), likely crashed
-                if any(word in last_event for word in ['responded', 'alert', 'observation', 'check']):
-                    # Was doing normal stuff, didn't shut down cleanly
-                    return True
+        if marker_file.exists():
+            # Previous instance didn't clean up - was a crash
+            logger.info("Crash marker found - previous instance didn't shut down cleanly")
+            return True
 
         return False
+
+    def _set_running_marker(self):
+        """Create marker file indicating we're running."""
+        marker_file = self.project_path / ".running"
+        try:
+            marker_file.write_text(f"Started: {datetime.now().isoformat()}")
+        except Exception as e:
+            logger.warning(f"Could not create running marker: {e}")
+
+    def _clear_running_marker(self):
+        """Remove marker file on clean shutdown."""
+        marker_file = self.project_path / ".running"
+        try:
+            if marker_file.exists():
+                marker_file.unlink()
+        except Exception as e:
+            logger.warning(f"Could not remove running marker: {e}")
 
     async def _analyze_crash(self):
         """Have Haiku analyze what might have caused the crash."""
@@ -625,11 +644,12 @@ This will be logged to ops-log.md for reference."""
         )
 
         # Log the analysis
-        self.memory.add_event(f"Crash analysis: {response[:150]}...")
+        logger.info(f"Crash analysis result: {response}")
+        self.memory.add_event(f"Crash analysis: {response[:250]}")
 
         # If Haiku found something actionable, add to history
         if 'unknown' not in response.lower():
-            self.memory.add_to_history(f"Crash on {datetime.now().strftime('%m/%d')}: {response[:100]}")
+            self.memory.add_to_history(f"Crash on {datetime.now().strftime('%m/%d')}: {response[:150]}")
 
     async def _attempt_auto_recovery(self, alerts: list[str]):
         """
@@ -658,7 +678,7 @@ Be concise in your response - it will be sent to Signal."""
         )
 
         # Log and notify
-        self.memory.add_event(f"Auto-recovery attempted: {response[:100]}...")
+        self.memory.add_event(f"Auto-recovery attempted: {response[:200]}")
 
         for group_id in self.signal.allowed_group_ids:
             self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}")
