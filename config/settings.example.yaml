@@ -1,31 +1,140 @@
 # Sunfish Relay Configuration
-# Copy this to settings.yaml and fill in your values
+# Copy to settings.yaml and fill in your values
 
+# =============================================================================
+# Signal Configuration
+# =============================================================================
 signal:
-  # Your phone number in international format (e.g., +14155551234)
+  # Your phone number in international format
   phone_number: "+1XXXXXXXXXX"
 
-  # Mode: "native" (local signal-cli) or "docker" (REST API)
-  # Native mode is simpler for local Mac development
-  mode: "native"
-
   # Group IDs allowed to send commands
-  # Native: signal-cli -u +1XXXXXXXXXX listGroups
-  # Docker: curl http://localhost:8080/v1/groups/+1XXXXXXXXXX
+  # Get with: signal-cli -u +1XXXXXXXXXX listGroups
   allowed_group_ids:
     - "GROUP_ID_HERE"
 
-# Path to your streaming agent project (where prompt.yaml lives)
-# Claude Code will have full access to read/edit files here
-project_path: "./stream-project"
+# =============================================================================
+# Claude Trigger Settings
+# =============================================================================
 
-# Polling interval in seconds
+# Trigger word - only messages containing this trigger Claude
+# Leave empty "" to respond to ALL messages (expensive!)
+trigger_word: "@claude"
+
+# Number of recent messages to include as context when triggered
+context_buffer_size: 30
+
+# =============================================================================
+# Project Path
+# =============================================================================
+
+# Path to your project root (where CLAUDE.md and ops-log.md live)
+# Claude Code runs from here and has access to all files
+project_path: "."
+
+# =============================================================================
+# Health Monitoring
+# =============================================================================
+
+# How often to check system health (seconds)
+health_check_interval: 60
+
+# Send proactive alerts when thresholds exceeded
+proactive_alerts: true
+
+# Polling interval for Signal messages (seconds)
 poll_interval: 2
 
-obs:
-  # Set to true to enable OBS integration
-  enabled: false
-  host: "localhost"
-  port: 4455
-  # OBS WebSocket password (set in OBS -> Tools -> WebSocket Server Settings)
-  password: ""
+# =============================================================================
+# Monitor Plugins
+# =============================================================================
+
+monitors:
+  # VPS Resources (CPU, RAM, Disk, GPU)
+  vps:
+    enabled: true
+    alerts:
+      cpu_pct_max: 90
+      memory_pct_max: 85
+      disk_pct_max: 85
+      gpu_temp_max: 80
+      gpu_util_max: 95
+
+  # OBS Studio (requires WebSocket)
+  obs:
+    enabled: false  # Enable when OBS is set up
+    host: "localhost"
+    port: 4455
+    password: ""  # Set in OBS -> Tools -> WebSocket Server Settings
+    alerts:
+      dropped_frames_pct: 1
+
+  # Streaming Agent Process
+  agent:
+    enabled: false  # Enable when agent is running
+    log_path: "./agent/logs"
+    log_file: "agent.log"
+    process_name: ""  # e.g., "python" or "node"
+    alerts:
+      max_log_age_sec: 300      # Alert if no log output for 5 min
+      max_errors_per_hour: 10   # Alert if too many errors
+
+  # Unity (placeholder - configure when ready)
+  # unity:
+  #   enabled: false
+  #   # TBD - depends on how Unity exposes metrics
+
+# =============================================================================
+# Smart Monitoring (Event-Driven)
+# =============================================================================
+
+# Only invoke Claude when something interesting happens
+smart_monitoring:
+  enabled: true
+
+  # Scheduled deep check interval (seconds) - baseline coverage
+  scheduled_check_interval: 1800  # 30 minutes
+
+  # How long to wait after Opus acts before verifying fix
+  post_action_delay: 120  # 2 minutes
+
+  # Change detection rules - customize thresholds per metric
+  # Format: metric_name: {delta_threshold, absolute_threshold, etc.}
+  rules:
+    # Override defaults
+    gpu_temp:
+      delta_threshold: 15      # Alert if jumps 15 degrees
+      absolute_threshold: 75   # Alert if above 75C
+      cooldown_seconds: 300    # Don't re-alert within 5 min
+
+    # Add custom metrics from your monitors
+    # Example: Unity FPS (when unity monitor is ready)
+    # unity_fps:
+    #   delta_threshold: 15
+    #   absolute_threshold: 25
+    #   cooldown_seconds: 60
+
+    # Example: Custom agent metric
+    # agent_queue_depth:
+    #   absolute_threshold: 100
+    #   delta_threshold: 50
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+
+# Use tiered models (Haiku observes, Opus acts)
+# Set to false to always use Opus (more expensive but simpler)
+use_tiered_models: true
+
+# =============================================================================
+# Startup & Recovery
+# =============================================================================
+
+# Send status message to Signal when orchestrator starts
+startup_notification: true
+
+# Automatically attempt to fix issues detected on startup
+# (Opus will assess and try to recover)
+# Set to false if you want manual control only
+auto_recovery: false

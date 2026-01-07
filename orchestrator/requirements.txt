@@ -1,8 +1,13 @@
-# Core dependencies
+# Sunfish Relay Orchestrator Dependencies
+
+# Config parsing
 pyyaml>=6.0
 
-# OBS integration (optional - only if obs.enabled=true)
-obsws-python>=1.6.0
+# OBS WebSocket (for OBS monitor)
+websocket-client>=1.6.0
 
-# Only needed for Docker/REST API mode
+# HTTP requests (for future REST-based monitors)
 requests>=2.31.0
+
+# QR code generation (for signal-cli linking)
+qrcode>=7.4
