@@ -26,19 +26,33 @@ class VPSMonitor(BaseMonitor):
             'gpu': self._get_gpu()
         }
 
+        # Store before checking alerts to prevent recursion
+        self._last_status = status
+
         # Check thresholds
         alerts = self.get_alerts()
         if alerts:
             status['healthy'] = False
             status['alerts'] = alerts
+            self._last_status = status
 
-        self._last_status = status
         return status
 
     def get_alerts(self) -> list[str]:
         """Check resource thresholds."""
         alerts = []
-        status = self._last_status or self.get_status()
+
+        # Use cached status or fetch fresh (but _last_status should always exist after get_status runs once)
+        if not self._last_status:
+            # Fetch raw metrics without recursing through get_status
+            status = {
+                'cpu_percent': self._get_cpu(),
+                'memory_percent': self._get_memory(),
+                'disk_percent': self._get_disk(),
+                'gpu': self._get_gpu()
+            }
+        else:
+            status = self._last_status
 
         thresholds = self.alerts_config
 
