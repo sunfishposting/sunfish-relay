@@ -86,6 +86,18 @@ class MemoryManager:
         with _file_lock:
             try:
                 return self.ops_log_path.read_text(encoding='utf-8')
+            except UnicodeDecodeError:
+                # Windows encoding fallback - try to recover
+                try:
+                    logger.warning("ops-log.md has encoding issues, attempting recovery...")
+                    content = self.ops_log_path.read_text(encoding='latin-1')
+                    # Rewrite as UTF-8
+                    self.ops_log_path.write_text(content, encoding='utf-8')
+                    return content
+                except Exception:
+                    logger.error("ops-log.md corrupted, resetting to default")
+                    self.ops_log_path.write_text(DEFAULT_OPS_LOG, encoding='utf-8')
+                    return DEFAULT_OPS_LOG
             except Exception as e:
                 logger.error(f"Failed to read ops-log: {e}")
                 return DEFAULT_OPS_LOG

@@ -72,7 +72,7 @@ class SignalCLINative:
     def receive_messages(self) -> list[dict]:
         """Poll for new messages using signal-cli."""
         try:
-            cmd = [self.signal_cli_path, "-u", self.phone_number, "receive", "--output=json", "-t", "5"]
+            cmd = [self.signal_cli_path, "-u", self.phone_number, "receive", "--json"]
             logger.debug(f"[POLL] Running: {' '.join(cmd)}")
 
             result = subprocess.run(
