@@ -50,13 +50,17 @@ Session continuity via `--resume SESSION_ID` + auto-compaction handles conversat
 ## Key Files
 
 **You read:**
-- `ops-log.md` - current state (status, events, issues)
+- `ops-log.md` - system state (status, events) - Python-managed, don't edit
+- `opus-scratch.md` - Opus's notes and action history
 - `config/settings.yaml` - configuration
 - `docs/` - procedures, fixes, architecture
 
 **Opus writes:**
-- `ops-log.md` - after taking actions, log what was done
-- Code files - when fixing bugs (then log in ops-log.md)
+- `opus-scratch.md` - your scratchpad for notes, actions, learnings (you own this file)
+- Code files - when fixing bugs
+
+**Python owns (don't edit):**
+- `ops-log.md` - orchestrator updates this automatically
 
 **Orchestrator manages:**
 - `orchestrator/main.py` - main loop

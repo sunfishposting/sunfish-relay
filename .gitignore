@@ -42,3 +42,4 @@ ops-log.tmp
 # Stream project files (if sensitive)
 stream-project/*.env
 stream-project/secrets/
+opus-scratch.md

@@ -13,10 +13,6 @@ _None currently_
 <!-- Auto-trimmed by orchestrator. Keep entries concise: what happened, outcome. -->
 - System initialized
 
-## Recent Actions by Opus
-<!-- What Opus did and why. Auto-trimmed to last 10 entries. -->
-_None yet_
-
 ## History Summary
 <!-- Compressed patterns and learnings, NOT a full log. Update when you notice recurring issues. -->
 - _No patterns observed yet_

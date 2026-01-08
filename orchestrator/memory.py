@@ -28,6 +28,7 @@ DEFAULT_OPS_LOG = """# Ops Log
 
 Current state and recent activity. This file is for EPHEMERAL STATE only.
 For procedures/fixes, see docs/. For architecture, see CLAUDE.md.
+Opus actions are in opus-scratch.md (separate file to avoid race conditions).
 
 ## Current Status
 _Waiting for first health check..._
@@ -38,10 +39,6 @@ _None currently_
 ## Recent Events (Last 6h)
 <!-- Auto-trimmed by orchestrator. Keep entries concise: what happened, outcome. -->
 - System initialized
-
-## Recent Actions by Opus
-<!-- What Opus did and why. Auto-trimmed to last 10 entries. -->
-_None yet_
 
 ## History Summary
 <!-- Compressed patterns and learnings, NOT a full log. Update when you notice recurring issues. -->
@@ -67,12 +64,11 @@ class MemoryManager:
     - Compressing old events into history summary
     """
 
-    # Section markers
+    # Section markers (Opus actions now in opus-scratch.md)
     SECTIONS = {
         'status': '## Current Status',
         'issues': '## Active Issues',
         'events': '## Recent Events',
-        'actions': '## Recent Actions by Opus',
         'history': '## History Summary',
         'instructions': '## Standing Instructions'
     }

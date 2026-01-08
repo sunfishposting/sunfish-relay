@@ -652,7 +652,7 @@ class Orchestrator:
                 self._save_sessions()
                 model_used = 'opus'
 
-            # Log event
+            # Log event (Opus logs its own actions to opus-scratch.md)
             self.memory.add_event(f"Responded to: {message_text[:50]}...")
 
             # Send response with model attribution
