@@ -29,12 +29,36 @@ VPS (Windows Server 2022, A40 GPU)
 
 Sonnet handles most queries. Says "ESCALATE: reason" if action needed → Opus takes over.
 
+## Memory Architecture
+
+Two types of memory - know the difference:
+
+**Ephemeral state (ops-log.md):**
+- Current status, active issues, recent events
+- Updated continuously, auto-trimmed
+- What's happening NOW
+
+**Structural knowledge (docs/):**
+- How to do things, how to fix things, where files are
+- Updated rarely, when patterns change
+- How the system WORKS
+
+Session continuity via `--resume SESSION_ID` + auto-compaction handles conversational memory.
+
 ## Key Files
 
-- `ops-log.md` - your memory (status, events, issues)
+**You read:**
+- `ops-log.md` - current state (status, events, issues)
 - `config/settings.yaml` - configuration
+- `docs/` - procedures, fixes, architecture
+
+**Opus writes:**
+- `ops-log.md` - after taking actions, log what was done
+- Code files - when fixing bugs (then log in ops-log.md)
+
+**Orchestrator manages:**
 - `orchestrator/main.py` - main loop
-- `docs/` - detailed reference (read when needed)
+- Session IDs for both Sonnet and Opus
 
 ## Signal Output
 
@@ -61,7 +85,20 @@ Your training data is stale. When unsure about CLI flags or APIs:
 2. If not there, use context7 MCP to look up docs
 3. Update `docs/` with what you learn
 
+**When to update docs:**
+- New external info learned (CLI flags, API patterns) → update relevant doc
+- Behavior change that affects how system works → update docs/memory.md or docs/operations.md
+- New failure pattern discovered → update docs/troubleshooting.md
+
+**When NOT to update docs:**
+- Minor code tweaks that don't change behavior
+- Bug fixes (unless they reveal a pattern)
+- Routine operations
+
+Keep updates concise. One line is better than a paragraph.
+
 **Reference docs:**
+- `docs/memory.md` - how context/memory works in this system
 - `docs/signal-cli.md` - signal-cli patterns
 - `docs/operations.md` - commands, startup/recovery
 - `docs/troubleshooting.md` - common issues

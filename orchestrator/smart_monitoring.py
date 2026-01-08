@@ -122,7 +122,7 @@ class SmartMonitor:
 
         # State
         self.previous_status: dict = {}
-        self.last_haiku_check: float = 0
+        self.last_check: float = 0
         self.pending_verification: Optional[float] = None
         self.last_trigger_times: dict[str, float] = {}
 
@@ -155,7 +155,7 @@ class SmartMonitor:
 
     def should_invoke_claude(self, current_status: dict) -> tuple[bool, str, list[str]]:
         """
-        Determine if we should invoke Claude (Haiku) for observation.
+        Determine if we should invoke Claude for observation.
 
         Args:
             current_status: Flattened dict of all current metric values
@@ -184,18 +184,18 @@ class SmartMonitor:
         self.previous_status = current_status.copy()
 
         if changed_metrics:
-            self.last_haiku_check = now
+            self.last_check = now
             return True, "significant_change", changed_metrics
 
         # 2. Post-action verification
         if self.pending_verification and now > self.pending_verification:
             self.pending_verification = None
-            self.last_haiku_check = now
+            self.last_check = now
             return True, "verify_fix", []
 
         # 3. Scheduled deep check (disabled if interval is 0)
-        if self.scheduled_check_interval > 0 and now - self.last_haiku_check > self.scheduled_check_interval:
-            self.last_haiku_check = now
+        if self.scheduled_check_interval > 0 and now - self.last_check > self.scheduled_check_interval:
+            self.last_check = now
             return True, "scheduled_check", []
 
         return False, "no_change", []

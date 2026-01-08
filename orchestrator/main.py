@@ -184,10 +184,11 @@ def call_claude_code(
     working_dir: Path,
     model: str = 'opus',
     allowed_tools: str = 'Read,Edit,Write,Bash,Glob,Grep',
-    timeout: int = 120
-) -> str:
+    timeout: int = 120,
+    session_id: Optional[str] = None
+) -> tuple[str, Optional[str]]:
     """
-    Execute Claude Code in headless mode.
+    Execute Claude Code in headless mode with session persistence.
 
     Args:
         prompt: The prompt to send
@@ -195,9 +196,10 @@ def call_claude_code(
         model: Model to use ('haiku', 'sonnet', 'opus')
         allowed_tools: Comma-separated list of allowed tools
         timeout: Max seconds to wait
+        session_id: Optional session ID to resume (enables auto-compaction)
 
     Returns:
-        Claude's response text
+        (response_text, session_id) - session_id for future calls
     """
     # Log model usage - OPUS calls are expensive!
     if model == 'opus':
@@ -205,13 +207,20 @@ def call_claude_code(
     else:
         logger.info(f"[CLAUDE] Calling {model}")
 
+    if session_id:
+        logger.debug(f"[SESSION] Resuming session {session_id[:20]}...")
+
     try:
         cmd = [
             _claude_path, "-p", prompt,
-            "--output-format", "text",
+            "--output-format", "json",  # JSON to capture session_id
             "--allowedTools", allowed_tools,
-            "--model", model,  # Always pass model explicitly
+            "--model", model,
         ]
+
+        # Resume existing session if we have one
+        if session_id:
+            cmd.extend(["--resume", session_id])
 
         result = subprocess.run(
             cmd,
@@ -223,15 +232,56 @@ def call_claude_code(
 
         if result.returncode != 0 and result.stderr:
             logger.error(f"Claude Code error: {result.stderr}")
-            return f"Error: {result.stderr[:500]}"
+            return f"Error: {result.stderr[:500]}", session_id
 
-        return result.stdout.strip() or "Done (no output)"
+        # Parse JSON response to extract text and session_id
+        output = result.stdout.strip()
+        if not output:
+            return "Done (no output)", session_id
+
+        try:
+            response_text = ""
+            new_session_id = session_id
+
+            # Claude outputs JSON array on single line, or newline-delimited
+            # Try array first, then fall back to newline-delimited
+            try:
+                data_list = json.loads(output)
+                if isinstance(data_list, list):
+                    for data in data_list:
+                        if isinstance(data, dict):
+                            if 'session_id' in data:
+                                new_session_id = data['session_id']
+                            if data.get('type') == 'result' and 'result' in data:
+                                response_text = data['result']
+            except json.JSONDecodeError:
+                # Fall back to newline-delimited
+                for line in output.split('\n'):
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if 'session_id' in data:
+                            new_session_id = data['session_id']
+                        if data.get('type') == 'result' and 'result' in data:
+                            response_text = data['result']
+                    except json.JSONDecodeError:
+                        continue
+
+            if new_session_id and new_session_id != session_id:
+                logger.info(f"[SESSION] {'New' if not session_id else 'Continued'} session: {new_session_id[:20]}...")
+
+            return response_text or "Done (no output)", new_session_id
+
+        except Exception as e:
+            logger.warning(f"JSON parse failed, falling back to raw output: {e}")
+            return output, session_id
 
     except subprocess.TimeoutExpired:
-        return "Request timed out"
+        return "Request timed out", session_id
     except Exception as e:
         logger.error(f"Claude Code failed: {e}")
-        return f"Failed: {e}"
+        return f"Failed: {e}", session_id
 
 
 def handle_message_tiered(
@@ -239,8 +289,10 @@ def handle_message_tiered(
     status_lines: list[str],
     conversation: list[dict],
     ops_log: str,
-    project_path: Path
-) -> tuple[str, str]:
+    project_path: Path,
+    sonnet_session_id: Optional[str] = None,
+    opus_session_id: Optional[str] = None
+) -> tuple[str, str, Optional[str], Optional[str]]:
     """
     Handle a message using tiered model approach.
 
@@ -251,7 +303,7 @@ def handle_message_tiered(
     Prompt provides: message, conversation, status, and ops-log (working memory).
 
     Returns:
-        (response, model_used)
+        (response, model_used, sonnet_session_id, opus_session_id)
     """
     # Format recent conversation
     convo_text = ""
@@ -278,12 +330,13 @@ OPS LOG:
 Read-only mode. If this needs ACTION (edit, restart, fix), respond: ESCALATE: <reason>"""
 
     # Try Sonnet first
-    response = call_claude_code(
+    response, sonnet_session_id = call_claude_code(
         prompt=sonnet_prompt,
         working_dir=project_path,
         model='sonnet',
         allowed_tools='Read,Glob,Grep',
-        timeout=60
+        timeout=60,
+        session_id=sonnet_session_id
     )
 
     # Check for escalation
@@ -305,18 +358,20 @@ OPS LOG:
 {ops_log}
 
 ---
-Full access. Handle this request."""
+Full access. Handle this request.
+If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
 
-        response = call_claude_code(
+        response, opus_session_id = call_claude_code(
             prompt=opus_prompt,
             working_dir=project_path,
             model='opus',
             allowed_tools='Read,Edit,Write,Bash,Glob,Grep',
-            timeout=120
+            timeout=120,
+            session_id=opus_session_id
         )
-        return response, 'opus'
+        return response, 'opus', sonnet_session_id, opus_session_id
 
-    return response, 'sonnet'
+    return response, 'sonnet', sonnet_session_id, opus_session_id
 
 
 # =============================================================================
@@ -390,6 +445,34 @@ class Orchestrator:
         self.processed_timestamps: set = set()
         self.message_buffer: list[dict] = []
         self.buffer_size = config.get('context_buffer_size', 30)
+
+        # Session IDs for persistent context (auto-compaction enabled)
+        self.session_file = self.project_path / ".sessions.json"
+        self.sonnet_session_id, self.opus_session_id = self._load_sessions()
+        logger.info(f"[SESSION] Loaded - Sonnet: {self.sonnet_session_id[:20] if self.sonnet_session_id else 'None'}..., Opus: {self.opus_session_id[:20] if self.opus_session_id else 'None'}...")
+
+    def _load_sessions(self) -> tuple[Optional[str], Optional[str]]:
+        """Load session IDs from disk."""
+        try:
+            if self.session_file.exists():
+                with open(self.session_file) as f:
+                    data = json.load(f)
+                    return data.get('sonnet'), data.get('opus')
+        except Exception as e:
+            logger.warning(f"Could not load sessions: {e}")
+        return None, None
+
+    def _save_sessions(self):
+        """Persist session IDs to disk."""
+        try:
+            with open(self.session_file, 'w') as f:
+                json.dump({
+                    'sonnet': self.sonnet_session_id,
+                    'opus': self.opus_session_id,
+                    'updated': datetime.now().isoformat()
+                }, f)
+        except Exception as e:
+            logger.warning(f"Could not save sessions: {e}")
 
     async def run(self):
         """Main entry point - runs signal and monitoring as independent tasks."""
@@ -524,23 +607,29 @@ OPS LOG:
 {ops_log}
 
 ---
-Full access. Handle this request."""
+Full access. Handle this request.
+If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
 
-                response = call_claude_code(
+                response, self.opus_session_id = call_claude_code(
                     prompt=prompt,
                     working_dir=self.project_path,
                     model='opus',
                     allowed_tools='Read,Edit,Write,Bash,Glob,Grep',
-                    timeout=120
+                    timeout=120,
+                    session_id=self.opus_session_id
                 )
+                self._save_sessions()
                 model_used = 'opus'
                 self.smart_monitor.schedule_verification()
 
             elif self.use_tiered_models:
                 # Tiered: Sonnet first, escalate to Opus if needed
-                response, model_used = handle_message_tiered(
-                    message_text, status_lines, self.message_buffer, ops_log, self.project_path
+                response, model_used, self.sonnet_session_id, self.opus_session_id = handle_message_tiered(
+                    message_text, status_lines, self.message_buffer, ops_log, self.project_path,
+                    sonnet_session_id=self.sonnet_session_id,
+                    opus_session_id=self.opus_session_id
                 )
+                self._save_sessions()
                 logger.info(f"Handled by {model_used}")
 
                 # If Opus acted, schedule verification
@@ -558,8 +647,12 @@ OPS LOG:
 {ops_log}
 
 ---
-Full access. Handle this request."""
-                response = call_claude_code(prompt, self.project_path)
+Full access. Handle this request.
+If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
+                response, self.opus_session_id = call_claude_code(
+                    prompt, self.project_path, session_id=self.opus_session_id
+                )
+                self._save_sessions()
                 model_used = 'opus'
 
             # Log event
@@ -618,13 +711,15 @@ Review. Respond with one of:
 - Brief concern (2-3 lines if worth noting)
 - "ALERT: <issue>" (if critical)"""
 
-        response = call_claude_code(
+        response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
             allowed_tools='Read,Glob,Grep',
-            timeout=60
+            timeout=60,
+            session_id=self.sonnet_session_id
         )
+        self._save_sessions()
 
         response_lower = response.lower().strip()
 
@@ -664,13 +759,15 @@ Did the fix work?
 - "Fix verified: <summary>" if resolved
 - "ALERT: Fix failed - <details>" if issue persists"""
 
-        response = call_claude_code(
+        response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
             allowed_tools='Read,Glob,Grep',
-            timeout=60
+            timeout=60,
+            session_id=self.sonnet_session_id
         )
+        self._save_sessions()
 
         self.memory.add_event(f"Verification: {response[:200]}")
 
@@ -805,13 +902,15 @@ Analyze briefly:
 - Likely cause (or "Unknown")
 - Recommended action (if any)"""
 
-        response = call_claude_code(
+        response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
             allowed_tools='Read,Glob,Grep',
-            timeout=60
+            timeout=60,
+            session_id=self.sonnet_session_id
         )
+        self._save_sessions()
 
         # Log the analysis
         logger.info(f"Crash analysis: {response}")
@@ -845,15 +944,18 @@ OPS LOG:
 {ops_log}
 
 ---
-Full access. Fix critical issues and report what you did."""
+Full access. Fix critical issues and report what you did.
+If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
 
-        response = call_claude_code(
+        response, self.opus_session_id = call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='opus',
             allowed_tools='Read,Edit,Write,Bash,Glob,Grep',
-            timeout=120
+            timeout=120,
+            session_id=self.opus_session_id
         )
+        self._save_sessions()
 
         # Log and notify
         self.memory.add_event(f"Auto-recovery: {response[:200]}")
