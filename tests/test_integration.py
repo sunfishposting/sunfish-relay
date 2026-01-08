@@ -141,7 +141,7 @@ def test_live_claude_call():
                 'claude', '-p', 'Respond with exactly: TEST_OK',
                 '--output-format', 'json',
                 '--model', 'haiku',  # Cheapest model for testing
-                '--allowedTools', '',  # No tools needed
+                '--tools', '',  # No tools available
             ],
             capture_output=True,
             text=True,
@@ -199,7 +199,7 @@ def test_session_resume():
                 'claude', '-p', 'Remember this number: 42. Respond with just OK.',
                 '--output-format', 'json',
                 '--model', 'haiku',
-                '--allowedTools', '',
+                '--tools', '',  # No tools available
             ],
             capture_output=True,
             text=True,
@@ -230,7 +230,7 @@ def test_session_resume():
                 'claude', '-p', 'What number did I ask you to remember? Just say the number.',
                 '--output-format', 'json',
                 '--model', 'haiku',
-                '--allowedTools', '',
+                '--tools', '',  # No tools available
                 '--resume', session_id,
             ],
             capture_output=True,

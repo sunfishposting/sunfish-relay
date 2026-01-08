@@ -54,6 +54,32 @@ Orchestrator stores session IDs:
 - `sonnet_session_id` - Sonnet's ongoing session
 - `opus_session_id` - Opus's ongoing session
 
+## Tiered Model Architecture
+
+Reference: [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
+
+Anthropic validates this pattern:
+- **Lead agent (expensive)**: Complex decisions, coordination, action
+- **Subagents (cheaper)**: Focused tasks, observation, analysis
+
+### Our Implementation
+
+| Role | Model | Tools | Use Case |
+|------|-------|-------|----------|
+| Observer | Sonnet | Read, Glob, Grep | Monitoring, status, simple queries |
+| Actor | Opus | All | Actions, fixes, complex problems |
+
+**Escalation pattern**: Sonnet responds to most queries. If action is needed:
+1. Sonnet returns `ESCALATE: <reason>`
+2. Orchestrator invokes Opus with full tools
+3. Opus handles the action and logs to ops-log.md
+
+**Direct @opus**: User can say "opus" to bypass Sonnet for known complex tasks.
+
+**Why separate sessions**: Each model maintains its own context. Sonnet's observation context stays focused. Opus's action context includes full history of fixes.
+
+**Verification disabled**: We originally had Sonnet verify Opus fixes after 2 minutes. This caused hangs on Windows and was removed. Instead, we rely on metric monitoring to detect if fixes worked (if GPU temp is still high, smart monitor triggers again).
+
 ## What Each Model Receives
 
 ### Every Call (Injected by Orchestrator)
