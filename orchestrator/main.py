@@ -27,6 +27,18 @@ import requests
 import yaml
 
 
+# =============================================================================
+# Response Style (included in all prompts)
+# =============================================================================
+
+RESPONSE_STYLE = """[STYLE: You're texting the operators on Signal. Be casual, friendly, concise.
+- Lead with the answer, skip preamble
+- 2-4 short paragraphs max
+- No markdown, no bullet lists, plain text only
+- Don't mention internal triggers or monitoring events
+- Technical when needed, but don't over-explain]"""
+
+
 def check_openrouter_balance() -> Optional[float]:
     """Check OpenRouter credit balance. Returns remaining credits or None on error."""
     api_key = os.environ.get('OPENROUTER_API_KEY')
@@ -358,6 +370,7 @@ def handle_message_tiered(
 
     # Prompt with full operational context
     sonnet_prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY. You CANNOT make changes, run commands, or call APIs. If user asks for ANY action, respond: ESCALATE: <reason>]
+{RESPONSE_STYLE}
 
 USER: "{message}"
 
@@ -389,6 +402,7 @@ OPS LOG:
 
         # Opus prompt - same structure, full access
         opus_prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Handle this request. Log significant actions to ops-log.md.]
+{RESPONSE_STYLE}
 
 USER: "{message}"
 
@@ -636,6 +650,7 @@ class Orchestrator:
                 status_text = "\n".join([f"- {line}" for line in status_lines])
 
                 prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Handle this request. Log significant actions to ops-log.md.]
+{RESPONSE_STYLE}
 
 USER: "{message_text}"
 
@@ -674,6 +689,7 @@ OPS LOG:
                 # Legacy: always use Opus
                 status_text = "\n".join([f"- {line}" for line in status_lines])
                 prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Handle this request. Log significant actions to ops-log.md.]
+{RESPONSE_STYLE}
 
 USER: "{message_text}"
 
@@ -730,8 +746,9 @@ OPS LOG:
         ops_log = self.memory.get_context_for_claude()
 
         prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY.]
+{RESPONSE_STYLE}
 
-MONITORING TRIGGER: {reason}
+Check in on the system. Something changed:
 {change_summary}
 
 LIVE STATUS:
@@ -741,7 +758,7 @@ OPS LOG:
 {ops_log}
 
 ---
-Review. Respond: "All clear." / Brief concern / "ALERT: <issue>" if critical."""
+If everything looks fine, don't message (just say "All clear."). Only message if there's something worth noting or an issue to flag."""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -780,8 +797,9 @@ Review. Respond: "All clear." / Brief concern / "ALERT: <issue>" if critical."""
         ops_log = self.memory.get_context_for_claude()
 
         prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY.]
+{RESPONSE_STYLE}
 
-VERIFICATION CHECK: Recent fix applied.
+Opus just made a fix. Check if it worked.
 
 LIVE STATUS:
 {status_text}
@@ -790,7 +808,7 @@ OPS LOG:
 {ops_log}
 
 ---
-Did the fix work? Respond: "Fix verified: <summary>" or "ALERT: Fix failed - <details>\""""
+If the issue is resolved, say "Fix verified: <what improved>". If still broken, say "ALERT: Fix failed - <what's still wrong>\""""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -924,8 +942,9 @@ Did the fix work? Respond: "Fix verified: <summary>" or "ALERT: Fix failed - <de
         ops_log = self.memory.get_context_for_claude()
 
         prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY.]
+{RESPONSE_STYLE}
 
-CRASH RECOVERY: System restarted unexpectedly.
+System just restarted after a crash. What happened?
 
 OPS LOG:
 {ops_log}
@@ -934,7 +953,7 @@ LOG TAIL (last 50 lines):
 {log_tail if log_tail else "(no log file)"}
 
 ---
-Analyze briefly: Likely cause (or "Unknown") and recommended action."""
+Quick analysis: what likely caused it and what should we do about it."""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -968,17 +987,19 @@ Analyze briefly: Likely cause (or "Unknown") and recommended action."""
         ops_log = self.memory.get_context_for_claude()
 
         prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Fix critical issues and log actions to ops-log.md.]
+{RESPONSE_STYLE}
 
-AUTO-RECOVERY: System restarted with issues.
-
-ALERTS:
+System restarted and found these issues that need fixing:
 {alerts_text}
 
 LIVE STATUS:
 {status_text}
 
 OPS LOG:
-{ops_log}"""
+{ops_log}
+
+---
+Fix what you can, then tell the team what you did."""
 
         response, self.opus_session_id = call_claude_code(
             prompt=prompt,
