@@ -31,20 +31,28 @@ def check_openrouter_balance() -> Optional[float]:
     """Check OpenRouter credit balance. Returns remaining credits or None on error."""
     api_key = os.environ.get('OPENROUTER_API_KEY')
     if not api_key:
-        return None  # No key, skip silently
+        logger.debug("[OPENROUTER] No API key set (OPENROUTER_API_KEY)")
+        return None
+
+    # Log key format for debugging (first 10 chars only)
+    key_preview = api_key[:10] + "..." if len(api_key) > 10 else api_key
+    logger.debug(f"[OPENROUTER] Using key: {key_preview}")
+
     try:
         resp = requests.get(
             'https://openrouter.ai/api/v1/credits',
             headers={'Authorization': f'Bearer {api_key}'},
-            timeout=(2, 5)  # (connect timeout, read timeout)
+            timeout=(2, 5)
         )
         if resp.status_code == 200:
             data = resp.json().get('data', {})
             total = data.get('total_credits', 0)
             used = data.get('total_usage', 0)
             return total - used
-    except:
-        pass  # Silently skip any errors - balance check is non-critical
+        else:
+            logger.warning(f"[OPENROUTER] API returned {resp.status_code}: {resp.text[:100]}")
+    except Exception as e:
+        logger.debug(f"[OPENROUTER] Error: {e}")
     return None
 
 
@@ -349,7 +357,9 @@ def handle_message_tiered(
     status_text = "\n".join([f"- {line}" for line in status_lines])
 
     # Prompt with full operational context
-    sonnet_prompt = f"""USER: "{message}"
+    sonnet_prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY. You CANNOT make changes, run commands, or call APIs. If user asks for ANY action, respond: ESCALATE: <reason>]
+
+USER: "{message}"
 
 RECENT CONVERSATION:
 {convo_text if convo_text else "(none)"}
@@ -358,12 +368,7 @@ LIVE STATUS:
 {status_text if status_text else "(no monitors active)"}
 
 OPS LOG:
-{ops_log}
-
----
-You are READ-ONLY. You can ONLY observe (Read, Glob, Grep). You CANNOT execute commands, restart services, or make changes.
-If user asks for ANY action, you MUST respond exactly: ESCALATE: <what they want>
-Do NOT pretend to do things you cannot do."""
+{ops_log}"""
 
     # Try Sonnet first (read-only observer, limited turns)
     response, sonnet_session_id = call_claude_code(
@@ -383,7 +388,9 @@ Do NOT pretend to do things you cannot do."""
         logger.info(f"[$$$ OPUS $$$] Escalating: {reason}")
 
         # Opus prompt - same structure, full access
-        opus_prompt = f"""USER: "{message}"
+        opus_prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Handle this request. Log significant actions to ops-log.md.]
+
+USER: "{message}"
 
 RECENT CONVERSATION:
 {convo_text if convo_text else "(none)"}
@@ -392,11 +399,7 @@ LIVE STATUS:
 {status_text if status_text else "(no monitors active)"}
 
 OPS LOG:
-{ops_log}
-
----
-Full access. Handle this request.
-If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
+{ops_log}"""
 
         response, opus_session_id = call_claude_code(
             prompt=opus_prompt,
@@ -632,7 +635,9 @@ class Orchestrator:
 
                 status_text = "\n".join([f"- {line}" for line in status_lines])
 
-                prompt = f"""USER: "{message_text}"
+                prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Handle this request. Log significant actions to ops-log.md.]
+
+USER: "{message_text}"
 
 RECENT CONVERSATION:
 {convo_text if convo_text else "(none)"}
@@ -641,11 +646,7 @@ LIVE STATUS:
 {status_text if status_text else "(no monitors active)"}
 
 OPS LOG:
-{ops_log}
-
----
-Full access. Handle this request.
-If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
+{ops_log}"""
 
                 response, self.opus_session_id = call_claude_code(
                     prompt=prompt,
@@ -672,17 +673,15 @@ If you make a SIGNIFICANT change (restart, fix, config edit, code change), add O
             else:
                 # Legacy: always use Opus
                 status_text = "\n".join([f"- {line}" for line in status_lines])
-                prompt = f"""USER: "{message_text}"
+                prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Handle this request. Log significant actions to ops-log.md.]
+
+USER: "{message_text}"
 
 LIVE STATUS:
 {status_text}
 
 OPS LOG:
-{ops_log}
-
----
-Full access. Handle this request.
-If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
+{ops_log}"""
                 response, self.opus_session_id = call_claude_code(
                     prompt, self.project_path, session_id=self.opus_session_id
                 )
@@ -730,7 +729,9 @@ If you make a SIGNIFICANT change (restart, fix, config edit, code change), add O
         status_text = "\n".join([f"- {line}" for line in status_lines])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""MONITORING TRIGGER: {reason}
+        prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY.]
+
+MONITORING TRIGGER: {reason}
 {change_summary}
 
 LIVE STATUS:
@@ -740,10 +741,7 @@ OPS LOG:
 {ops_log}
 
 ---
-Review. Respond with one of:
-- "All clear." (if nothing concerning)
-- Brief concern (2-3 lines if worth noting)
-- "ALERT: <issue>" (if critical)"""
+Review. Respond: "All clear." / Brief concern / "ALERT: <issue>" if critical."""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -781,7 +779,9 @@ Review. Respond with one of:
         status_text = "\n".join([f"- {line}" for line in status_lines])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""VERIFICATION CHECK: Recent fix applied.
+        prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY.]
+
+VERIFICATION CHECK: Recent fix applied.
 
 LIVE STATUS:
 {status_text}
@@ -790,9 +790,7 @@ OPS LOG:
 {ops_log}
 
 ---
-Did the fix work?
-- "Fix verified: <summary>" if resolved
-- "ALERT: Fix failed - <details>" if issue persists"""
+Did the fix work? Respond: "Fix verified: <summary>" or "ALERT: Fix failed - <details>\""""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -925,7 +923,9 @@ Did the fix work?
 
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""CRASH RECOVERY: System restarted unexpectedly.
+        prompt = f"""[ROLE: You are SONNET - the read-only observer. You have Read/Glob/Grep tools ONLY.]
+
+CRASH RECOVERY: System restarted unexpectedly.
 
 OPS LOG:
 {ops_log}
@@ -934,9 +934,7 @@ LOG TAIL (last 50 lines):
 {log_tail if log_tail else "(no log file)"}
 
 ---
-Analyze briefly:
-- Likely cause (or "Unknown")
-- Recommended action (if any)"""
+Analyze briefly: Likely cause (or "Unknown") and recommended action."""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -969,7 +967,9 @@ Analyze briefly:
         alerts_text = "\n".join([f"- {a}" for a in alerts])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""AUTO-RECOVERY: System restarted with issues.
+        prompt = f"""[ROLE: You are OPUS - the actor with full access. You have ALL tools: Read/Edit/Write/Bash/Glob/Grep. Fix critical issues and log actions to ops-log.md.]
+
+AUTO-RECOVERY: System restarted with issues.
 
 ALERTS:
 {alerts_text}
@@ -978,11 +978,7 @@ LIVE STATUS:
 {status_text}
 
 OPS LOG:
-{ops_log}
-
----
-Full access. Fix critical issues and report what you did.
-If you make a SIGNIFICANT change (restart, fix, config edit, code change), add ONE concise line to ops-log.md under "Recent Actions by Opus"."""
+{ops_log}"""
 
         response, self.opus_session_id = call_claude_code(
             prompt=prompt,
@@ -1016,6 +1012,7 @@ If you make a SIGNIFICANT change (restart, fix, config edit, code change), add O
         balance = check_openrouter_balance()
         if balance is not None:
             lines.append(f"OpenRouter: ${balance:.2f} remaining")
+            logger.info(f"[BALANCE] OpenRouter: ${balance:.2f}")
 
         return lines
 
