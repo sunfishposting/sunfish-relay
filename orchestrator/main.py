@@ -260,12 +260,17 @@ def call_claude_code(
         cmd.extend(["--resume", session_id])
 
     try:
+        # Log the actual command for debugging
+        logger.debug(f"[CMD] {' '.join(cmd[:6])}...")  # First 6 args (hide prompt)
+
         # Use Popen for streaming instead of run() with timeout
+        # bufsize=1 enables line buffering which helps on Windows
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,  # Line buffered
             cwd=str(working_dir)
         )
 
@@ -364,6 +369,29 @@ def call_claude_code(
 
         # Wait for process to complete
         proc.wait()
+
+        # Read any remaining stdout that wasn't captured line-by-line
+        # (Windows buffering can cause this)
+        remaining = proc.stdout.read()
+        if remaining:
+            logger.debug(f"[REMAINING] Got {len(remaining)} bytes after loop")
+            for line in remaining.strip().split('\n'):
+                if not line:
+                    continue
+                lines_read += 1
+                try:
+                    evt = json.loads(line)
+                    if 'session_id' in evt:
+                        new_session_id = evt['session_id']
+                    if evt.get('type') == 'assistant':
+                        for block in evt.get('message', {}).get('content', []):
+                            if isinstance(block, dict) and block.get('type') == 'text':
+                                text_buffer += block.get('text', '')
+                    elif evt.get('type') == 'result':
+                        response_text = evt.get('result', '')
+                except json.JSONDecodeError:
+                    pass
+
         stderr = proc.stderr.read()
 
         # Always log stderr if present (may contain warnings even on success)
