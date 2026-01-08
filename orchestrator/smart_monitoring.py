@@ -42,7 +42,7 @@ DEFAULT_RULES = {
     'memory_percent': MetricRule(
         name='memory_percent',
         delta_threshold=20,
-        absolute_threshold=85,
+        absolute_threshold=90,  # Raised from 85% - Windows servers often run higher
     ),
     'disk_percent': MetricRule(
         name='disk_percent',
@@ -119,8 +119,10 @@ class SmartMonitor:
         # Timing
         self.scheduled_check_interval = self.config.get('scheduled_check_interval', 1800)
         self.post_action_delay = self.config.get('post_action_delay', 120)
+        self.startup_grace_period = self.config.get('startup_grace_period', 300)  # 5 min default
 
         # State
+        self.start_time: float = time.time()
         self.previous_status: dict = {}
         self.last_check: float = 0
         self.pending_verification: Optional[float] = None
@@ -167,6 +169,10 @@ class SmartMonitor:
             return False, "disabled", []
 
         now = time.time()
+
+        # Startup grace period - don't alert immediately after restart
+        if now - self.start_time < self.startup_grace_period:
+            return False, "startup_grace_period", []
         changed_metrics = []
 
         # 1. Check for significant changes

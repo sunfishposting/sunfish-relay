@@ -443,18 +443,41 @@ async def call_claude_code(
 
         try:
             data_list = json.loads(output)
+            cost_usd = None
+            num_turns = None
+            duration_ms = None
+
             if isinstance(data_list, list):
                 for item in data_list:
                     if isinstance(item, dict):
                         if 'session_id' in item:
                             new_session_id = item['session_id']
-                        if item.get('type') == 'result' and 'result' in item:
-                            response_text = item['result']
+                        if item.get('type') == 'result':
+                            if 'result' in item:
+                                response_text = item['result']
+                            # Extract usage stats from result block
+                            cost_usd = item.get('cost_usd')
+                            num_turns = item.get('num_turns')
+                            duration_ms = item.get('duration_ms')
             else:
                 if 'session_id' in data_list:
                     new_session_id = data_list['session_id']
                 if 'result' in data_list:
                     response_text = data_list['result']
+                cost_usd = data_list.get('cost_usd')
+                num_turns = data_list.get('num_turns')
+                duration_ms = data_list.get('duration_ms')
+
+            # Log usage stats if available
+            if cost_usd is not None or num_turns is not None:
+                stats = []
+                if cost_usd is not None:
+                    stats.append(f"${cost_usd:.4f}")
+                if num_turns is not None:
+                    stats.append(f"{num_turns} turns")
+                if duration_ms is not None:
+                    stats.append(f"{duration_ms/1000:.1f}s")
+                logger.info(f"[CLAUDE USAGE] {model}: {', '.join(stats)}")
 
         except json.JSONDecodeError:
             logger.warning("[CLAUDE] Output not JSON, using as plain text")
@@ -595,33 +618,37 @@ class Orchestrator:
         _openrouter_api_key = config.get('openrouter', {}).get('api_key')
 
         # State
-        self.processed_timestamps: set = set()
         self.message_buffer: list[dict] = []
         self.buffer_size = config.get('context_buffer_size', 30)
 
-        # Session IDs for persistent context (auto-compaction enabled)
+        # Persistent state file (sessions + processed timestamps)
         self.session_file = self.project_path / ".sessions.json"
-        self.sonnet_session_id, self.opus_session_id = self._load_sessions()
+        self.sonnet_session_id, self.opus_session_id, self.processed_timestamps = self._load_sessions()
         logger.info(f"[SESSION] Loaded - Sonnet: {self.sonnet_session_id[:20] if self.sonnet_session_id else 'None'}..., Opus: {self.opus_session_id[:20] if self.opus_session_id else 'None'}...")
+        logger.info(f"[DEDUP] Loaded {len(self.processed_timestamps)} processed message timestamps")
 
-    def _load_sessions(self) -> tuple[Optional[str], Optional[str]]:
-        """Load session IDs from disk."""
+    def _load_sessions(self) -> tuple[Optional[str], Optional[str], set]:
+        """Load session IDs and processed timestamps from disk."""
         try:
             if self.session_file.exists():
                 with open(self.session_file) as f:
                     data = json.load(f)
-                    return data.get('sonnet'), data.get('opus')
+                    timestamps = set(data.get('processed_timestamps', []))
+                    return data.get('sonnet'), data.get('opus'), timestamps
         except Exception as e:
             logger.warning(f"Could not load sessions: {e}")
-        return None, None
+        return None, None, set()
 
     def _save_sessions(self):
-        """Persist session IDs to disk."""
+        """Persist session IDs and processed timestamps to disk."""
         try:
+            # Keep only last 500 timestamps to prevent file bloat
+            timestamps_list = list(self.processed_timestamps)[-500:]
             with open(self.session_file, 'w') as f:
                 json.dump({
                     'sonnet': self.sonnet_session_id,
                     'opus': self.opus_session_id,
+                    'processed_timestamps': timestamps_list,
                     'updated': datetime.now().isoformat()
                 }, f)
         except Exception as e:
@@ -725,12 +752,14 @@ class Orchestrator:
             timestamp = envelope.get('timestamp')
 
             if timestamp in self.processed_timestamps:
+                logger.debug(f"[DEDUP] Skipping already-processed message {timestamp}")
                 continue
             self.processed_timestamps.add(timestamp)
 
-            # Trim processed set
+            # Trim processed set and persist (prevents duplicates on restart)
             if len(self.processed_timestamps) > 1000:
                 self.processed_timestamps = set(list(self.processed_timestamps)[-500:])
+            self._save_sessions()  # Persist timestamps early to prevent duplicates on crash
 
             parsed = self.signal.extract_group_message(msg)
             if not parsed:
