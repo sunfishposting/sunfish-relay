@@ -272,10 +272,16 @@ class SmartMonitor:
         return current
 
     def schedule_verification(self, delay_seconds: int = None):
-        """Schedule a verification check after Opus takes action."""
-        delay = delay_seconds or self.post_action_delay
-        self.pending_verification = time.time() + delay
-        logger.info(f"Scheduled verification check in {delay} seconds")
+        """
+        Schedule a verification check after Opus takes action.
+        DISABLED: Relying on normal metric monitoring to detect if fixes work.
+        The previous implementation caused hangs and was brittle.
+        """
+        # Disabled - monitoring will catch ongoing issues via metric changes
+        # delay = delay_seconds or self.post_action_delay
+        # self.pending_verification = time.time() + delay
+        # logger.info(f"Scheduled verification check in {delay} seconds")
+        pass
 
     def flatten_status(self, nested_status: dict) -> dict:
         """

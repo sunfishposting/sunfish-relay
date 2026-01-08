@@ -651,7 +651,7 @@ If you make a SIGNIFICANT change (restart, fix, config edit, code change), add O
                 )
                 self._save_sessions()
                 model_used = 'opus'
-                self.smart_monitor.schedule_verification()
+                # Don't schedule verification for user queries - only for auto-recovery
 
             elif self.use_tiered_models:
                 # Tiered: Sonnet first, escalate to Opus if needed
@@ -662,10 +662,7 @@ If you make a SIGNIFICANT change (restart, fix, config edit, code change), add O
                 )
                 self._save_sessions()
                 logger.info(f"Handled by {model_used}")
-
-                # If Opus acted, schedule verification
-                if model_used == 'opus':
-                    self.smart_monitor.schedule_verification()
+                # Don't schedule verification for user queries - only for auto-recovery
             else:
                 # Legacy: always use Opus
                 status_text = "\n".join([f"- {line}" for line in status_lines])
