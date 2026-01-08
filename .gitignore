@@ -31,6 +31,7 @@ logs/
 
 # Runtime markers
 .running
+.sessions.json
 
 # Ops log (local state, not code)
 ops-log.md
