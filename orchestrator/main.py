@@ -22,7 +22,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import requests
 import yaml
+
+
+def check_openrouter_balance() -> Optional[float]:
+    """Check OpenRouter credit balance. Returns remaining credits or None on error."""
+    api_key = os.environ.get('OPENROUTER_API_KEY')
+    if not api_key:
+        return None
+    try:
+        resp = requests.get(
+            'https://openrouter.ai/api/v1/credits',
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            data = resp.json().get('data', {})
+            total = data.get('total_credits', 0)
+            used = data.get('total_usage', 0)
+            return total - used
+    except Exception as e:
+        logger.warning(f"Failed to check OpenRouter balance: {e}")
+    return None
 
 
 def strip_markdown(text: str) -> str:
@@ -136,6 +158,11 @@ class SignalCLINative:
         try:
             # Strip markdown formatting for plain text
             message = strip_markdown(message)
+
+            # Check balance and append warning if low
+            balance = check_openrouter_balance()
+            if balance is not None and balance < 10:
+                message += f"\n\n⚠️ LOW BALANCE: ${balance:.2f} remaining"
 
             if len(message) > 4000:
                 message = message[:3900] + "\n\n[truncated]"
