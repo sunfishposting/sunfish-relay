@@ -1001,6 +1001,12 @@ If you make a SIGNIFICANT change (restart, fix, config edit, code change), add O
                 lines.append(monitor.get_status_line())
             except Exception as e:
                 lines.append(f"{name}: error ({e})")
+
+        # Add OpenRouter balance
+        balance = check_openrouter_balance()
+        if balance is not None:
+            lines.append(f"OpenRouter: ${balance:.2f} remaining")
+
         return lines
 
     def _update_status_in_memory(self):
