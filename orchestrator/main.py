@@ -431,53 +431,45 @@ async def call_claude_code(
 
         if returncode != 0:
             logger.error(f"[CLAUDE ERROR] {stderr[:500] if stderr else 'No stderr'}")
-            return f"Error (rc={returncode}): {stderr[:200] if stderr else 'Unknown error'}", session_id
+            return f"Error (rc={returncode}): {stderr[:200] if stderr else 'Unknown error'}", session_id, ""
 
         output = stdout.strip()
         if not output:
             logger.warning("[CLAUDE] Empty output")
-            return "No response from Claude", session_id
+            return "No response from Claude", session_id, ""
 
         response_text = ""
         new_session_id = session_id
+        tool_counts: dict[str, int] = {}
 
         try:
             data_list = json.loads(output)
-            cost_usd = None
-            num_turns = None
-            duration_ms = None
 
             if isinstance(data_list, list):
                 for item in data_list:
                     if isinstance(item, dict):
                         if 'session_id' in item:
                             new_session_id = item['session_id']
-                        if item.get('type') == 'result':
-                            if 'result' in item:
-                                response_text = item['result']
-                            # Extract usage stats from result block
-                            cost_usd = item.get('cost_usd')
-                            num_turns = item.get('num_turns')
-                            duration_ms = item.get('duration_ms')
+                        if item.get('type') == 'result' and 'result' in item:
+                            response_text = item['result']
+                        # Extract tool usage from assistant messages
+                        if item.get('type') == 'assistant':
+                            message = item.get('message', {})
+                            content = message.get('content', [])
+                            for block in content:
+                                if isinstance(block, dict) and block.get('type') == 'tool_use':
+                                    tool_name = block.get('name', 'unknown')
+                                    tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
             else:
                 if 'session_id' in data_list:
                     new_session_id = data_list['session_id']
                 if 'result' in data_list:
                     response_text = data_list['result']
-                cost_usd = data_list.get('cost_usd')
-                num_turns = data_list.get('num_turns')
-                duration_ms = data_list.get('duration_ms')
 
-            # Log usage stats if available
-            if cost_usd is not None or num_turns is not None:
-                stats = []
-                if cost_usd is not None:
-                    stats.append(f"${cost_usd:.4f}")
-                if num_turns is not None:
-                    stats.append(f"{num_turns} turns")
-                if duration_ms is not None:
-                    stats.append(f"{duration_ms/1000:.1f}s")
-                logger.info(f"[CLAUDE USAGE] {model}: {', '.join(stats)}")
+            # Log tool usage
+            if tool_counts:
+                tools_str = ", ".join(f"{k}: {v}" for k, v in sorted(tool_counts.items()))
+                logger.info(f"[CLAUDE TOOLS] {model}: {tools_str}")
 
         except json.JSONDecodeError:
             logger.warning("[CLAUDE] Output not JSON, using as plain text")
@@ -486,15 +478,20 @@ async def call_claude_code(
         if new_session_id and new_session_id != session_id:
             logger.info(f"[SESSION] {new_session_id[:20]}...")
 
-        return response_text or "No response from Claude", new_session_id
+        # Format tool summary for caller
+        tool_summary = ""
+        if tool_counts:
+            tool_summary = ", ".join(f"{k}: {v}" for k, v in sorted(tool_counts.items()))
+
+        return response_text or "No response from Claude", new_session_id, tool_summary
 
     except subprocess.TimeoutExpired:
         logger.error(f"[TIMEOUT] Claude exceeded {timeout}s (killed)")
-        return f"Request timed out after {timeout}s", session_id
+        return f"Request timed out after {timeout}s", session_id, ""
 
     except Exception as e:
         logger.error(f"[CLAUDE] Failed: {e}")
-        return f"Error: {e}", session_id
+        return f"Error: {e}", session_id, ""
 
 
 async def handle_message_tiered(
@@ -513,11 +510,11 @@ async def handle_message_tiered(
     2. If Sonnet needs action, escalate to Opus
 
     Returns:
-        (response, model_used, sonnet_session_id, opus_session_id)
+        (response, model_used, sonnet_session_id, opus_session_id, tool_summary)
     """
     sonnet_prompt = message
 
-    response, sonnet_session_id = await call_claude_code(
+    response, sonnet_session_id, tool_summary = await call_claude_code(
         prompt=sonnet_prompt,
         working_dir=project_path,
         model='sonnet',
@@ -533,7 +530,7 @@ async def handle_message_tiered(
         reason = response.split(':', 1)[1].strip() if ':' in response else 'Action required'
         logger.info(f"[$$$ OPUS $$$] Escalating: {reason}")
 
-        response, opus_session_id = await call_claude_code(
+        response, opus_session_id, tool_summary = await call_claude_code(
             prompt=message,
             working_dir=project_path,
             model='opus',
@@ -541,9 +538,9 @@ async def handle_message_tiered(
             timeout=120,
             session_id=opus_session_id
         )
-        return response, 'opus', sonnet_session_id, opus_session_id
+        return response, 'opus', sonnet_session_id, opus_session_id, tool_summary
 
-    return response, 'sonnet', sonnet_session_id, opus_session_id
+    return response, 'sonnet', sonnet_session_id, opus_session_id, tool_summary
 
 
 # =============================================================================
@@ -800,11 +797,13 @@ class Orchestrator:
             ops_log = self.memory.get_context_for_claude()
 
             # Route to appropriate model
+            tool_summary = ""
+
             if direct_opus:
                 # Direct Opus access - bypass Sonnet entirely
                 logger.info("[$$$ OPUS $$$] Direct Opus request")
 
-                response, self.opus_session_id = await call_claude_code(
+                response, self.opus_session_id, tool_summary = await call_claude_code(
                     prompt=message_text,
                     working_dir=self.project_path,
                     model='opus',
@@ -817,7 +816,7 @@ class Orchestrator:
 
             elif self.use_tiered_models:
                 # Tiered: Sonnet first, escalate to Opus if needed
-                response, model_used, self.sonnet_session_id, self.opus_session_id = await handle_message_tiered(
+                response, model_used, self.sonnet_session_id, self.opus_session_id, tool_summary = await handle_message_tiered(
                     message_text, status_lines, self.message_buffer, ops_log, self.project_path,
                     sonnet_session_id=self.sonnet_session_id,
                     opus_session_id=self.opus_session_id
@@ -826,7 +825,7 @@ class Orchestrator:
                 logger.info(f"Handled by {model_used}")
             else:
                 # Legacy: always use Opus
-                response, self.opus_session_id = await call_claude_code(
+                response, self.opus_session_id, tool_summary = await call_claude_code(
                     message_text, self.project_path, session_id=self.opus_session_id
                 )
                 self._save_sessions()
@@ -835,8 +834,11 @@ class Orchestrator:
             # Log event
             self.memory.add_event(f"Responded to: {message_text[:50]}...")
 
-            # Send response with model attribution
-            tagged_response = f"{response}\n\n— {model_used}"
+            # Send response with model attribution and tool summary
+            attribution = f"— {model_used}"
+            if tool_summary:
+                attribution += f" [{tool_summary}]"
+            tagged_response = f"{response}\n\n{attribution}"
             await self.signal.send_message(group_id, tagged_response)
 
     async def _smart_monitoring_check(self):
@@ -874,7 +876,7 @@ class Orchestrator:
 
 If all good, say "All clear." Only message if something's off."""
 
-        response, self.sonnet_session_id = await call_claude_code(
+        response, self.sonnet_session_id, tool_summary = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
@@ -891,22 +893,27 @@ If all good, say "All clear." Only message if something's off."""
             logger.info("Sonnet: All clear")
             return
 
+        # Format attribution
+        attribution = "— sonnet"
+        if tool_summary:
+            attribution += f" [{tool_summary}]"
+
         # Alert - high priority
         if response_lower.startswith('alert:'):
             self.memory.add_event(f"Alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
-                await self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
+                await self.signal.send_message(group_id, f"🚨 {response}\n\n{attribution}")
         else:
             self.memory.add_event(f"Observation: {response[:200]}")
             logger.info(f"Sonnet observation: {response}")
             for group_id in self.signal.allowed_group_ids:
-                await self.signal.send_message(group_id, f"{response}\n\n— sonnet")
+                await self.signal.send_message(group_id, f"{response}\n\n{attribution}")
 
     async def _verification_check(self, status: dict):
         """Verify that a recent Opus fix worked."""
         prompt = """Opus just made a fix. Did it work? Say "Fix verified" or "ALERT: still broken"."""
 
-        response, self.sonnet_session_id = await call_claude_code(
+        response, self.sonnet_session_id, tool_summary = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
@@ -920,8 +927,11 @@ If all good, say "All clear." Only message if something's off."""
         self.memory.add_event(f"Verification: {response[:200]}")
 
         if 'alert:' in response.lower():
+            attribution = "— sonnet"
+            if tool_summary:
+                attribution += f" [{tool_summary}]"
             for group_id in self.signal.allowed_group_ids:
-                await self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
+                await self.signal.send_message(group_id, f"🚨 {response}\n\n{attribution}")
 
     async def _startup_check(self):
         """
@@ -1025,7 +1035,7 @@ If all good, say "All clear." Only message if something's off."""
 
         prompt = """System crashed and restarted. Quick take - what happened?"""
 
-        response, self.sonnet_session_id = await call_claude_code(
+        response, self.sonnet_session_id, _ = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
@@ -1055,7 +1065,7 @@ If all good, say "All clear." Only message if something's off."""
 
 Fix what you can and let us know what you did."""
 
-        response, self.opus_session_id = await call_claude_code(
+        response, self.opus_session_id, _ = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='opus',
@@ -1113,44 +1123,53 @@ def main():
     - First Ctrl+C: Attempts graceful shutdown (5 second timeout)
     - Second Ctrl+C or timeout: Forces immediate exit
     """
+    import threading
+
     config = load_config()
     orchestrator = Orchestrator(config)
 
-    # Track if we're already shutting down
+    # Track shutdown state
     shutting_down = False
+    shutdown_timer = None
 
     def force_exit():
-        """Force exit after timeout."""
-        logger.warning("Shutdown timeout - forcing exit")
+        """Force exit - called by timer or second interrupt."""
+        logger.warning("Forcing exit")
         os._exit(1)
 
-    def handle_interrupt():
-        """Handle Ctrl+C with timeout."""
-        nonlocal shutting_down
+    def signal_handler(signum, frame):
+        """Handle Ctrl+C BEFORE asyncio gets it."""
+        nonlocal shutting_down, shutdown_timer
+
         if shutting_down:
-            # Second interrupt - force exit
+            # Second interrupt - force immediate exit
             logger.warning("Second interrupt - forcing immediate exit")
-            os._exit(1)
+            force_exit()
 
         shutting_down = True
-        logger.info("Shutting down (Ctrl+C again to force)...")
+        logger.info("Shutting down (Ctrl+C again to force, auto-exit in 5s)...")
 
-        # Schedule force exit after 5 seconds
-        import threading
-        timer = threading.Timer(5.0, force_exit)
-        timer.daemon = True
-        timer.start()
+        # Start 5-second force exit timer
+        shutdown_timer = threading.Timer(5.0, force_exit)
+        shutdown_timer.daemon = True
+        shutdown_timer.start()
+
+        # Raise KeyboardInterrupt to stop asyncio.run()
+        raise KeyboardInterrupt
+
+    # Install signal handler BEFORE asyncio.run() so we control shutdown
+    signal.signal(signal.SIGINT, signal_handler)
 
     try:
         asyncio.run(orchestrator.run())
     except KeyboardInterrupt:
-        handle_interrupt()
-        # Give the finally block a chance to run
-        try:
-            # Brief pause for cleanup
-            pass
-        except KeyboardInterrupt:
-            force_exit()
+        # Graceful shutdown initiated by our signal handler
+        # Timer is already running - just wait for cleanup or force exit
+        pass
+
+    # Cancel timer if we got here cleanly
+    if shutdown_timer:
+        shutdown_timer.cancel()
 
 
 if __name__ == "__main__":
