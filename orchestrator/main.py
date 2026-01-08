@@ -31,9 +31,7 @@ import yaml
 # Response Style (included in all prompts)
 # =============================================================================
 
-# Minimal role hints - CLAUDE.md handles personality
-SONNET_HINT = "(You're Sonnet - read-only. Say ESCALATE: reason if action needed.)"
-OPUS_HINT = "(You're Opus - full access. Log actions to ops-log.md.)"
+# No hints needed - CLAUDE.md already explains roles and ESCALATE pattern
 
 
 def check_openrouter_balance() -> Optional[float]:
@@ -365,10 +363,8 @@ def handle_message_tiered(
     # Format live status
     status_text = "\n".join([f"- {line}" for line in status_lines])
 
-    # Minimal prompt - CLAUDE.md handles personality
-    sonnet_prompt = f"""{SONNET_HINT}
-
-{message}"""
+    # Just the message - CLAUDE.md handles everything
+    sonnet_prompt = message
 
     # Try Sonnet first (read-only observer, limited turns)
     response, sonnet_session_id = call_claude_code(
@@ -387,10 +383,8 @@ def handle_message_tiered(
         reason = response.split(':', 1)[1].strip() if ':' in response else 'Action required'
         logger.info(f"[$$$ OPUS $$$] Escalating: {reason}")
 
-        # Minimal prompt - CLAUDE.md handles personality
-        opus_prompt = f"""{OPUS_HINT}
-
-{message}"""
+        # Just the message - CLAUDE.md handles everything
+        opus_prompt = message
 
         response, opus_session_id = call_claude_code(
             prompt=opus_prompt,
@@ -626,9 +620,7 @@ class Orchestrator:
 
                 status_text = "\n".join([f"- {line}" for line in status_lines])
 
-                prompt = f"""{OPUS_HINT}
-
-{message_text}"""
+                prompt = message_text
 
                 response, self.opus_session_id = call_claude_code(
                     prompt=prompt,
@@ -654,11 +646,8 @@ class Orchestrator:
                 # Don't schedule verification for user queries - only for auto-recovery
             else:
                 # Legacy: always use Opus
-                prompt = f"""{OPUS_HINT}
-
-{message_text}"""
                 response, self.opus_session_id = call_claude_code(
-                    prompt, self.project_path, session_id=self.opus_session_id
+                    message_text, self.project_path, session_id=self.opus_session_id
                 )
                 self._save_sessions()
                 model_used = 'opus'
@@ -704,9 +693,7 @@ class Orchestrator:
         status_text = "\n".join([f"- {line}" for line in status_lines])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""{SONNET_HINT}
-
-System check-in. Changes: {change_summary}
+        prompt = f"""System check-in. Changes: {change_summary}
 
 If all good, say "All clear." Only message if something's off."""
 
@@ -746,9 +733,7 @@ If all good, say "All clear." Only message if something's off."""
         status_text = "\n".join([f"- {line}" for line in status_lines])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""{SONNET_HINT}
-
-Opus just made a fix. Did it work? Say "Fix verified" or "ALERT: still broken"."""
+        prompt = """Opus just made a fix. Did it work? Say "Fix verified" or "ALERT: still broken"."""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -881,9 +866,7 @@ Opus just made a fix. Did it work? Say "Fix verified" or "ALERT: still broken"."
 
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""{SONNET_HINT}
-
-System crashed and restarted. Quick take - what happened?"""
+        prompt = """System crashed and restarted. Quick take - what happened?"""
 
         response, self.sonnet_session_id = call_claude_code(
             prompt=prompt,
@@ -916,9 +899,7 @@ System crashed and restarted. Quick take - what happened?"""
         alerts_text = "\n".join([f"- {a}" for a in alerts])
         ops_log = self.memory.get_context_for_claude()
 
-        prompt = f"""{OPUS_HINT}
-
-System restarted with issues: {alerts_text}
+        prompt = f"""System restarted with issues: {alerts_text}
 
 Fix what you can and let us know what you did."""
 
