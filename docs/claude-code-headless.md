@@ -119,103 +119,51 @@ export BASH_MAX_TIMEOUT_MS="30000"
 export DISABLE_AUTOUPDATER="1"  # Production stability
 ```
 
-## Streaming for Observability
+## Python Integration
 
-Use `stream-json` to see what Claude is doing in real-time (NDJSON format - one JSON object per line):
-
-```bash
-claude -p "$prompt" \
-  --output-format stream-json \
-  --model opus \
-  --resume "$SESSION_ID"
-```
-
-### Event Types
-
-**System init** (first event):
-```json
-{"type":"system","subtype":"init","session_id":"uuid","tools":["Read","Write",...]}
-```
-
-**Assistant message** (text or tool use):
-```json
-{"type":"assistant","message":{"id":"msg_...","role":"assistant","model":"claude-sonnet-4-...","content":[{"type":"text","text":"..."}],"usage":{"input_tokens":100,"output_tokens":50}},"session_id":"uuid"}
-```
-
-**Tool use** (in assistant content array):
-```json
-{"type":"tool_use","id":"toolu_...","name":"Read","input":{"file_path":"/path/to/file"}}
-```
-
-**Tool result** (user message):
-```json
-{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_...","type":"tool_result","content":"file contents"}]},"session_id":"uuid"}
-```
-
-**Final result**:
-```json
-{"type":"result","subtype":"success","result":"final response text","session_id":"uuid","cost_usd":0.05,"num_turns":3,"duration_ms":5000}
-```
-
-### Known Issues
-
-**Result event sometimes missing**: The final `result` event may not be emitted (GitHub issue #1920). Always accumulate text from assistant messages as a fallback.
-
-### Python Parsing (Correct Pattern)
+Use `subprocess.run()` with `--output-format json` for reliable output:
 
 ```python
-proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+result = subprocess.run(
+    [
+        'claude', '-p', prompt,
+        '--output-format', 'json',
+        '--model', 'sonnet',
+        '--tools', 'Read,Glob,Grep',
+        '--max-turns', '5',
+        '--resume', session_id,  # optional
+    ],
+    capture_output=True,
+    text=True,
+    timeout=120,
+    cwd=project_path
+)
 
+# Parse JSON array output
 response_text = ""
-text_buffer = ""  # Fallback for missing result event
+new_session_id = None
 
-# IMPORTANT: Use readline(), not `for line in proc.stdout:`
-# The iterator uses block buffering which breaks streaming
-while True:
-    line = proc.stdout.readline()
-    if not line:
-        if proc.poll() is not None:
-            break
-        continue
-
-    line = line.strip()
-    if not line:
-        continue
-
+if result.returncode == 0:
     try:
-        evt = json.loads(line)
+        data_list = json.loads(result.stdout)
+        for item in data_list:
+            if 'session_id' in item:
+                new_session_id = item['session_id']
+            if item.get('type') == 'result':
+                response_text = item['result']
     except json.JSONDecodeError:
-        continue
-
-    # Capture session_id from any event
-    if 'session_id' in evt:
-        session_id = evt['session_id']
-
-    # Assistant messages - extract text and tool use
-    if evt.get('type') == 'assistant':
-        for block in evt.get('message', {}).get('content', []):
-            if block.get('type') == 'tool_use':
-                print(f"[TOOL] {block.get('name')}")
-            elif block.get('type') == 'text':
-                text_buffer += block.get('text', '')
-
-    # Final result (may not always arrive - known bug)
-    elif evt.get('type') == 'result':
-        response_text = evt.get('result', '')
-
-proc.wait()
-
-# Fallback if result event missing
-if not response_text and text_buffer:
-    response_text = text_buffer.strip()
+        # Plain text fallback
+        response_text = result.stdout
 ```
+
+**Note**: `--output-format stream-json` exists for real-time streaming but has Windows compatibility issues. Use `json` format for reliability.
 
 ## Our Implementation
 
-Sonnet (read-only observer, 5 turns max):
+Sonnet (read-only observer, 5 turns max, 60s timeout):
 ```bash
 claude -p "$prompt" \
-  --output-format stream-json \
+  --output-format json \
   --model sonnet \
   --tools "Read,Glob,Grep" \
   --max-turns 5 \
@@ -225,14 +173,12 @@ claude -p "$prompt" \
 Opus (full access actor, 10 turns max, 10 min timeout):
 ```bash
 claude -p "$prompt" \
-  --output-format stream-json \
+  --output-format json \
   --model opus \
   --tools "Read,Edit,Write,Bash,Glob,Grep" \
   --max-turns 10 \
   --resume "$OPUS_SESSION_ID"
 ```
-
-Tool usage is logged in real-time as `[TOOL] toolname` in orchestrator logs.
 
 ## References
 

@@ -212,215 +212,109 @@ def call_claude_code(
     working_dir: Path,
     model: str = 'opus',
     allowed_tools: str = 'Read,Edit,Write,Bash,Glob,Grep',
-    timeout: int = 600,  # 10 min default - Opus can think for a while
+    timeout: int = 600,
     session_id: Optional[str] = None,
     max_turns: int = 10
 ) -> tuple[str, Optional[str]]:
     """
-    Execute Claude Code in headless mode with streaming output for observability.
+    Execute Claude Code in headless mode.
 
-    Uses stream-json format to log tool usage in real-time. This lets us see
-    what Claude is doing during long operations (Opus can think for 5+ minutes).
+    Uses --output-format json for reliable structured output.
+    Pattern validated in test_integration.py.
 
     Args:
         prompt: The prompt to send
         working_dir: Directory to run from (for CLAUDE.md context)
         model: Model to use ('haiku', 'sonnet', 'opus')
-        allowed_tools: Comma-separated list of tools to make available (uses --tools flag).
-                       This RESTRICTS which tools Claude can use, not just what runs without prompting.
-        timeout: Max seconds to wait (default 600 = 10 min for complex Opus work)
-        session_id: Optional session ID to resume (enables auto-compaction)
-        max_turns: Max agentic turns before stopping (cost control, default 10)
+        allowed_tools: Comma-separated tools (--tools flag restricts available tools)
+        timeout: Max seconds to wait
+        session_id: Optional session ID to resume
+        max_turns: Max agentic turns (cost control)
 
     Returns:
-        (response_text, session_id) - session_id for future calls
+        (response_text, session_id)
     """
-    # Log model usage - OPUS calls are expensive!
+    # Log model usage
     if model == 'opus':
-        logger.warning(f"[$$$ OPUS $$$] Calling Opus with tools: {allowed_tools}")
+        logger.warning(f"[$$$ OPUS $$$] Calling Opus (tools: {allowed_tools})")
     else:
-        logger.info(f"[CLAUDE] Calling {model}")
+        logger.info(f"[CLAUDE] Calling {model}...")
 
-    if session_id:
-        logger.debug(f"[SESSION] Resuming session {session_id[:20]}...")
-
+    # Build command
     cmd = [
-        _claude_path, "-p", prompt,
-        "--output-format", "stream-json",  # Stream for real-time visibility
+        _claude_path,
+        "-p", prompt,
+        "--output-format", "json",
         "--model", model,
         "--max-turns", str(max_turns),
     ]
 
-    # Use --tools to RESTRICT available tools (for Sonnet read-only)
     if allowed_tools:
         cmd.extend(["--tools", allowed_tools])
 
-    # Resume existing session if we have one
     if session_id:
         cmd.extend(["--resume", session_id])
 
     try:
-        # Log the actual command for debugging
-        logger.debug(f"[CMD] {' '.join(cmd[:6])}...")  # First 6 args (hide prompt)
-
-        # Use Popen for streaming instead of run() with timeout
-        # bufsize=1 enables line buffering which helps on Windows
-        proc = subprocess.Popen(
+        result = subprocess.run(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
-            bufsize=1,  # Line buffered
+            timeout=timeout,
             cwd=str(working_dir)
         )
 
+        # Log completion
+        logger.info(f"[CLAUDE] {model} finished (rc={result.returncode})")
+
+        # Check for errors
+        if result.returncode != 0:
+            logger.error(f"[CLAUDE ERROR] {result.stderr[:500] if result.stderr else 'No stderr'}")
+            return f"Error (rc={result.returncode}): {result.stderr[:200] if result.stderr else 'Unknown error'}", session_id
+
+        # Parse JSON output (array format per Claude Code docs)
+        output = result.stdout.strip()
+        if not output:
+            logger.warning("[CLAUDE] Empty output")
+            return "No response from Claude", session_id
+
         response_text = ""
         new_session_id = session_id
-        tools_used = []
-        start_time = time.time()
 
-        # Track streaming text - used as fallback if result event is missing (known Claude Code bug)
-        text_buffer = ""
-        last_text_log = 0
-        lines_read = 0
-
-        logger.debug(f"[STREAM] Starting to read output...")
-
-        # Read streaming output line by line using readline() for proper unbuffered reading
-        # Note: `for line in proc.stdout:` uses block buffering which breaks streaming
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                # No more output - check if process ended
-                if proc.poll() is not None:
-                    break
-                continue
-
-            # Check timeout
-            if time.time() - start_time > timeout:
-                proc.kill()
-                logger.error(f"[TIMEOUT] Claude exceeded {timeout}s")
-                return f"Request timed out after {timeout}s", session_id
-
-            line = line.strip()
-            if not line:
-                continue
-
-            lines_read += 1
-
-            # Debug: log raw lines if we're having issues
-            logger.debug(f"[RAW] {line[:200]}")
-
-            try:
-                evt = json.loads(line)
-                evt_type = evt.get('type')
-
-                # Capture session_id from any event that has it
-                if 'session_id' in evt:
-                    new_session_id = evt['session_id']
-
-                # Assistant message - contains tool_use and text in content array
-                if evt_type == 'assistant':
-                    message = evt.get('message', {})
-                    content = message.get('content', [])
-                    for block in content:
-                        if isinstance(block, dict):
-                            block_type = block.get('type')
-
-                            # Tool use - log with input
-                            if block_type == 'tool_use':
-                                tool_name = block.get('name', 'unknown')
-                                tool_input = block.get('input', {})
-                                tools_used.append(tool_name)
-
-                                # Format tool log with key input info
-                                if 'file_path' in tool_input:
-                                    logger.info(f"[TOOL] {tool_name}: {tool_input['file_path']}")
-                                elif 'command' in tool_input:
-                                    cmd_preview = tool_input['command'][:80]
-                                    logger.info(f"[TOOL] {tool_name}: {cmd_preview}")
-                                elif 'pattern' in tool_input:
-                                    logger.info(f"[TOOL] {tool_name}: pattern={tool_input['pattern']}")
-                                else:
-                                    logger.info(f"[TOOL] {tool_name}")
-
-                            # Text block - accumulate for streaming preview
-                            elif block_type == 'text':
-                                text_chunk = block.get('text', '')
-                                text_buffer += text_chunk
-                                # Log text every 2 seconds (debounced)
-                                now = time.time()
-                                if now - last_text_log > 2 and text_buffer:
-                                    preview = text_buffer[-100:] if len(text_buffer) > 100 else text_buffer
-                                    # Clean up for display
-                                    preview = preview.replace('\n', ' ').strip()
-                                    if preview:
-                                        logger.info(f"[STREAM] ...{preview}")
-                                    last_text_log = now
-
-                # Capture final result
-                elif evt_type == 'result' and 'result' in evt:
-                    response_text = evt['result']
-                    logger.debug(f"[RESULT] Got final result: {response_text[:100]}...")
-
-            except json.JSONDecodeError as e:
-                logger.debug(f"[JSON ERROR] {e}: {line[:100]}")
-                continue
-
-        # Wait for process to complete
-        proc.wait()
-
-        # Read any remaining stdout that wasn't captured line-by-line
-        # (Windows buffering can cause this)
-        remaining = proc.stdout.read()
-        if remaining:
-            logger.debug(f"[REMAINING] Got {len(remaining)} bytes after loop")
-            for line in remaining.strip().split('\n'):
-                if not line:
-                    continue
-                lines_read += 1
-                try:
-                    evt = json.loads(line)
-                    if 'session_id' in evt:
-                        new_session_id = evt['session_id']
-                    if evt.get('type') == 'assistant':
-                        for block in evt.get('message', {}).get('content', []):
-                            if isinstance(block, dict) and block.get('type') == 'text':
-                                text_buffer += block.get('text', '')
-                    elif evt.get('type') == 'result':
-                        response_text = evt.get('result', '')
-                except json.JSONDecodeError:
-                    pass
-
-        stderr = proc.stderr.read()
-
-        # Always log stderr if present (may contain warnings even on success)
-        if stderr:
-            if proc.returncode != 0:
-                logger.error(f"[CLAUDE ERROR] (rc={proc.returncode}): {stderr}")
-                return f"Error: {stderr[:500]}", session_id
+        try:
+            data_list = json.loads(output)
+            if isinstance(data_list, list):
+                for item in data_list:
+                    if isinstance(item, dict):
+                        # Capture session_id
+                        if 'session_id' in item:
+                            new_session_id = item['session_id']
+                        # Capture result
+                        if item.get('type') == 'result' and 'result' in item:
+                            response_text = item['result']
             else:
-                logger.warning(f"[CLAUDE STDERR] {stderr[:500]}")
+                # Single object response
+                if 'session_id' in data_list:
+                    new_session_id = data_list['session_id']
+                if 'result' in data_list:
+                    response_text = data_list['result']
+
+        except json.JSONDecodeError as e:
+            # Not JSON - treat as plain text response
+            logger.warning(f"[CLAUDE] Output not JSON, using as plain text")
+            response_text = output
 
         if new_session_id and new_session_id != session_id:
-            logger.info(f"[SESSION] {'New' if not session_id else 'Continued'} session: {new_session_id[:20]}...")
-
-        if tools_used:
-            logger.info(f"[SUMMARY] Tools: {', '.join(tools_used)}")
-
-        # Fallback: if no result event (known Claude Code bug), use accumulated text
-        if not response_text and text_buffer:
-            logger.warning(f"[CLAUDE] No result event - using accumulated text (known bug)")
-            response_text = text_buffer.strip()
-
-        # Log if we got nothing (helps debug)
-        if not response_text:
-            logger.warning(f"[CLAUDE] No output at all. Lines read: {lines_read}, Return code: {proc.returncode}")
+            logger.info(f"[SESSION] {new_session_id[:20]}...")
 
         return response_text or "No response from Claude", new_session_id
 
+    except subprocess.TimeoutExpired:
+        logger.error(f"[TIMEOUT] Claude exceeded {timeout}s")
+        return f"Request timed out after {timeout}s", session_id
+
     except Exception as e:
-        logger.error(f"Claude Code failed: {e}")
+        logger.error(f"[CLAUDE] Failed: {e}")
         return f"Error: {e}", session_id
 
 
