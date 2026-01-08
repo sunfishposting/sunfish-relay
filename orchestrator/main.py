@@ -281,10 +281,14 @@ def call_claude_code(
                                 new_session_id = data['session_id']
                             if data.get('type') == 'result' and 'result' in data:
                                 response_text = data['result']
-                            # Log tool usage for visibility
-                            if data.get('type') == 'tool_use':
-                                tool_name = data.get('name', 'unknown')
-                                logger.info(f"[TOOL] {tool_name}")
+                            # Log tool usage - it's nested in assistant message content
+                            if data.get('type') == 'assistant' and 'message' in data:
+                                msg = data['message']
+                                if isinstance(msg, dict) and 'content' in msg:
+                                    for block in msg['content']:
+                                        if isinstance(block, dict) and block.get('type') == 'tool_use':
+                                            tool_name = block.get('name', 'unknown')
+                                            logger.info(f"[TOOL] {tool_name}")
             except json.JSONDecodeError:
                 # Fall back to newline-delimited
                 for line in output.split('\n'):
