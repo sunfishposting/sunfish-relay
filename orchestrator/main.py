@@ -274,12 +274,23 @@ def call_claude_code(
         tools_used = []
         start_time = time.time()
 
-        # Track streaming text
+        # Track streaming text - used as fallback if result event is missing (known Claude Code bug)
         text_buffer = ""
         last_text_log = 0
+        lines_read = 0
 
-        # Read streaming output line by line (truly streams as Claude generates)
-        for line in proc.stdout:
+        logger.debug(f"[STREAM] Starting to read output...")
+
+        # Read streaming output line by line using readline() for proper unbuffered reading
+        # Note: `for line in proc.stdout:` uses block buffering which breaks streaming
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                # No more output - check if process ended
+                if proc.poll() is not None:
+                    break
+                continue
+
             # Check timeout
             if time.time() - start_time > timeout:
                 proc.kill()
@@ -289,6 +300,11 @@ def call_claude_code(
             line = line.strip()
             if not line:
                 continue
+
+            lines_read += 1
+
+            # Debug: log raw lines if we're having issues
+            logger.debug(f"[RAW] {line[:200]}")
 
             try:
                 evt = json.loads(line)
@@ -340,17 +356,23 @@ def call_claude_code(
                 # Capture final result
                 elif evt_type == 'result' and 'result' in evt:
                     response_text = evt['result']
+                    logger.debug(f"[RESULT] Got final result: {response_text[:100]}...")
 
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.debug(f"[JSON ERROR] {e}: {line[:100]}")
                 continue
 
         # Wait for process to complete
         proc.wait()
         stderr = proc.stderr.read()
 
-        if proc.returncode != 0 and stderr:
-            logger.error(f"Claude Code error: {stderr}")
-            return f"Error: {stderr[:500]}", session_id
+        # Always log stderr if present (may contain warnings even on success)
+        if stderr:
+            if proc.returncode != 0:
+                logger.error(f"[CLAUDE ERROR] (rc={proc.returncode}): {stderr}")
+                return f"Error: {stderr[:500]}", session_id
+            else:
+                logger.warning(f"[CLAUDE STDERR] {stderr[:500]}")
 
         if new_session_id and new_session_id != session_id:
             logger.info(f"[SESSION] {'New' if not session_id else 'Continued'} session: {new_session_id[:20]}...")
@@ -358,7 +380,16 @@ def call_claude_code(
         if tools_used:
             logger.info(f"[SUMMARY] Tools: {', '.join(tools_used)}")
 
-        return response_text or "Done (no output)", new_session_id
+        # Fallback: if no result event (known Claude Code bug), use accumulated text
+        if not response_text and text_buffer:
+            logger.warning(f"[CLAUDE] No result event - using accumulated text (known bug)")
+            response_text = text_buffer.strip()
+
+        # Log if we got nothing (helps debug)
+        if not response_text:
+            logger.warning(f"[CLAUDE] No output at all. Lines read: {lines_read}, Return code: {proc.returncode}")
+
+        return response_text or "No response from Claude", new_session_id
 
     except Exception as e:
         logger.error(f"Claude Code failed: {e}")
