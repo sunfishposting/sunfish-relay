@@ -53,6 +53,11 @@ proactive_alerts: true
 # Polling interval for Signal messages (seconds)
 poll_interval: 2
 
+# Temp folder cleanup interval (seconds). Cleans orphaned libsignal folders.
+# Set to 0 to disable. Default: 3600 (1 hour)
+# This is a safety net - the main fix is the java.library.path in signal-cli.bat
+temp_cleanup_interval: 3600
+
 # =============================================================================
 # Monitor Plugins
 # =============================================================================
@@ -127,6 +132,15 @@ smart_monitoring:
     # agent_queue_depth:
     #   absolute_threshold: 100
     #   delta_threshold: 50
+
+# =============================================================================
+# OpenRouter Configuration
+# =============================================================================
+
+# API key for balance checking (optional)
+# If not set, will try OPENROUTER_API_KEY environment variable
+openrouter:
+  api_key: ""  # sk-or-v1-your-key-here
 
 # =============================================================================
 # Model Configuration

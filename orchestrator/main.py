@@ -16,8 +16,11 @@ import json
 import logging
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,17 +31,83 @@ import yaml
 
 
 # =============================================================================
+# Async Subprocess Helper
+# =============================================================================
+
+async def run_subprocess_async(
+    cmd: list[str],
+    timeout: float,
+    input_data: bytes = None,
+    cwd: str = None
+) -> tuple[int, str, str]:
+    """
+    Run a subprocess asynchronously with proper timeout and cleanup.
+
+    Unlike subprocess.run(), this:
+    1. Doesn't block the asyncio event loop
+    2. Properly kills the process on timeout (no zombies)
+    3. Handles Windows Ctrl+C gracefully
+
+    Args:
+        cmd: Command and arguments
+        timeout: Timeout in seconds
+        input_data: Optional bytes to send to stdin
+        cwd: Working directory
+
+    Returns:
+        (returncode, stdout, stderr)
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if input_data else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=input_data),
+                timeout=timeout
+            )
+            return proc.returncode, stdout.decode('utf-8', errors='replace'), stderr.decode('utf-8', errors='replace')
+
+        except asyncio.TimeoutError:
+            # Kill the process on timeout - don't leave zombies
+            try:
+                proc.kill()
+                await proc.wait()  # Clean up process resources
+            except ProcessLookupError:
+                pass  # Already dead
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+    except asyncio.CancelledError:
+        # Task was cancelled (e.g., shutdown) - kill subprocess
+        try:
+            proc.kill()
+            await proc.wait()
+        except (ProcessLookupError, UnboundLocalError):
+            pass
+        raise
+
+
+# =============================================================================
 # Response Style (included in all prompts)
 # =============================================================================
 
 # No hints needed - CLAUDE.md already explains roles and ESCALATE pattern
 
+# Module-level API key (set by Orchestrator from config)
+_openrouter_api_key: Optional[str] = None
+
 
 def check_openrouter_balance() -> Optional[float]:
     """Check OpenRouter credit balance. Returns remaining credits or None on error."""
-    api_key = os.environ.get('OPENROUTER_API_KEY')
+    # Use module-level key (from config) or env var
+    api_key = _openrouter_api_key or os.environ.get('OPENROUTER_API_KEY')
     if not api_key:
-        logger.debug("[OPENROUTER] No API key set (OPENROUTER_API_KEY)")
+        logger.debug("[OPENROUTER] No API key configured")
         return None
 
     # Log key format for debugging (first 10 chars only)
@@ -77,6 +146,110 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     return text
 
+
+# =============================================================================
+# Temp Folder Cleanup (libsignal leak prevention)
+# =============================================================================
+
+# Pattern: "libsignal" followed by ONLY digits (the random ID format)
+# This is very specific to avoid accidentally matching anything else
+LIBSIGNAL_PATTERN = re.compile(r'^libsignal\d+$')
+
+
+def cleanup_libsignal_temp_folders(max_age_seconds: int = 300) -> dict:
+    """
+    Clean up orphaned libsignal temp folders on Windows.
+
+    libsignal-client extracts native DLLs to randomly-named temp folders
+    (e.g., libsignal4521685467174493703) on each invocation. On Windows,
+    these can't be deleted while loaded, so they accumulate.
+
+    We have a permanent fix (pre-extracted DLL with java.library.path),
+    but this serves as a safety net in case that fix fails.
+
+    Safety measures:
+    1. Only matches folders named "libsignal" + digits (nothing else)
+    2. Only deletes folders older than max_age_seconds (default 5 min)
+    3. Only operates in system TEMP directory
+    4. Catches permission errors gracefully (folder in use = skip it)
+    5. Logs warnings if ANY folders are found (early warning the fix isn't working)
+
+    Returns:
+        dict with keys: checked, deleted, failed, warning
+    """
+    result = {'checked': 0, 'deleted': 0, 'failed': 0, 'warning': False}
+
+    # Only run on Windows (this issue doesn't affect Linux/Mac)
+    if sys.platform != 'win32':
+        return result
+
+    try:
+        temp_dir = Path(tempfile.gettempdir())
+    except Exception as e:
+        logger.debug(f"[CLEANUP] Could not get temp dir: {e}")
+        return result
+
+    now = time.time()
+    folders_found = []
+
+    # Search TEMP and one level of subdirs (folders appeared in TEMP\2\ on VPS)
+    search_paths = [temp_dir]
+    try:
+        for subdir in temp_dir.iterdir():
+            if subdir.is_dir() and subdir.name.isdigit():
+                search_paths.append(subdir)
+    except Exception:
+        pass  # Permission issues reading temp dir
+
+    for search_path in search_paths:
+        try:
+            for item in search_path.iterdir():
+                if not item.is_dir():
+                    continue
+
+                # CRITICAL: Only match exact pattern "libsignal" + digits
+                if not LIBSIGNAL_PATTERN.match(item.name):
+                    continue
+
+                result['checked'] += 1
+                folders_found.append(item)
+
+                # Check age
+                try:
+                    mtime = item.stat().st_mtime
+                    age_seconds = now - mtime
+
+                    if age_seconds < max_age_seconds:
+                        # Too recent - might be in use, skip
+                        continue
+
+                    # Safe to delete - old enough
+                    shutil.rmtree(item, ignore_errors=False)
+                    result['deleted'] += 1
+                    logger.info(f"[CLEANUP] Deleted old libsignal folder: {item.name} (age: {int(age_seconds)}s)")
+
+                except PermissionError:
+                    # Folder is locked (DLL in use) - this is expected, skip silently
+                    result['failed'] += 1
+                except Exception as e:
+                    result['failed'] += 1
+                    logger.debug(f"[CLEANUP] Could not delete {item.name}: {e}")
+
+        except Exception as e:
+            logger.debug(f"[CLEANUP] Error scanning {search_path}: {e}")
+
+    # If we found ANY libsignal folders, warn - the permanent fix might not be working
+    if folders_found:
+        result['warning'] = True
+        logger.warning(
+            f"[CLEANUP] Found {len(folders_found)} libsignal temp folder(s). "
+            f"Deleted {result['deleted']}, skipped {result['failed']} (in use). "
+            f"If this persists, check the java.library.path fix in signal-cli.bat"
+        )
+
+    return result
+
+
 from health import HealthAggregator
 from memory import MemoryManager
 from smart_monitoring import SmartMonitor
@@ -107,33 +280,23 @@ class SignalCLINative:
         self.phone_number = phone_number
         self.allowed_group_ids = set(allowed_group_ids)
 
-    def receive_messages(self) -> list[dict]:
-        """Poll for new messages using signal-cli."""
+    async def receive_messages(self) -> list[dict]:
+        """Poll for new messages using signal-cli (async)."""
         try:
-            # Remove -t flag - it may be causing hangs on Windows
-            # Let signal-cli return immediately with whatever's available
             cmd = [self.signal_cli_path, "-u", self.phone_number, "--output", "json", "receive"]
             logger.debug("[POLL] Starting receive...")
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=15  # Safety net - signal-cli should return in <5s
-            )
+            returncode, stdout, stderr = await run_subprocess_async(cmd, timeout=15)
 
-            # Log any stderr from signal-cli
-            if result.stderr:
-                logger.warning(f"[POLL] signal-cli stderr: {result.stderr[:200]}")
+            if stderr:
+                logger.warning(f"[POLL] signal-cli stderr: {stderr[:200]}")
 
-            # Log return code
-            if result.returncode != 0:
-                logger.warning(f"[POLL] signal-cli returned {result.returncode}")
+            if returncode != 0:
+                logger.warning(f"[POLL] signal-cli returned {returncode}")
 
             messages = []
-            raw_output = result.stdout.strip()
+            raw_output = stdout.strip()
 
-            # Debug: show raw output length
             if raw_output:
                 logger.debug(f"[POLL] Received {len(raw_output)} bytes")
 
@@ -142,7 +305,6 @@ class SignalCLINative:
                     try:
                         msg = json.loads(line)
                         messages.append(msg)
-                        # Debug: log raw incoming messages
                         env = msg.get('envelope', msg)
                         data_msg = env.get('dataMessage', {})
                         text = data_msg.get('message', '')
@@ -153,7 +315,6 @@ class SignalCLINative:
                         if text:
                             logger.info(f"[RAW MSG] from={sender} group={group[:20] if group != 'DM' else 'DM'}... text={text[:100]}")
                         else:
-                            # Log non-text messages (receipts, typing, etc)
                             msg_type = 'receipt' if env.get('receiptMessage') else 'typing' if env.get('typingMessage') else 'other'
                             logger.debug(f"[RAW {msg_type.upper()}] from={sender}")
                     except json.JSONDecodeError as e:
@@ -163,19 +324,17 @@ class SignalCLINative:
             logger.debug(f"[POLL] Parsed {len(messages)} messages")
             return messages
         except subprocess.TimeoutExpired:
-            logger.warning("[POLL] signal-cli timed out (hung?) - will retry next cycle")
+            logger.warning("[POLL] signal-cli timed out (killed) - will retry next cycle")
             return []
         except Exception as e:
             logger.error(f"[POLL] Failed to receive messages: {e}")
             return []
 
-    def send_message(self, group_id: str, message: str):
-        """Send a message to a group via stdin (handles newlines properly on Windows)."""
+    async def send_message(self, group_id: str, message: str):
+        """Send a message to a group via stdin (async)."""
         try:
-            # Strip markdown formatting for plain text
             message = strip_markdown(message)
 
-            # Check balance and append warning if low
             balance = check_openrouter_balance()
             if balance is not None and balance < 10:
                 message += f"\n\n⚠️ LOW BALANCE: ${balance:.2f} remaining"
@@ -183,19 +342,15 @@ class SignalCLINative:
             if len(message) > 4000:
                 message = message[:3900] + "\n\n[truncated]"
 
-            # Use --message-from-stdin to properly handle newlines on Windows
-            # Encode as UTF-8 bytes to avoid Windows cp1252 encoding issues
-            result = subprocess.run(
-                [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "--message-from-stdin"],
-                input=message.encode('utf-8'),
-                capture_output=True,
-                timeout=30
+            cmd = [self.signal_cli_path, "-u", self.phone_number, "send", "-g", group_id, "--message-from-stdin"]
+            returncode, stdout, stderr = await run_subprocess_async(
+                cmd, timeout=30, input_data=message.encode('utf-8')
             )
-            if result.returncode == 0:
-                # Show full message in logs
+
+            if returncode == 0:
                 logger.info(f"[-> SIGNAL]\n{message}")
             else:
-                logger.error(f"[-> SIGNAL FAILED] {result.stderr}")
+                logger.error(f"[-> SIGNAL FAILED] {stderr}")
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
 
@@ -222,7 +377,7 @@ class SignalCLINative:
 _claude_path = "claude"
 
 
-def call_claude_code(
+async def call_claude_code(
     prompt: str,
     working_dir: Path,
     model: str = 'opus',
@@ -232,16 +387,15 @@ def call_claude_code(
     max_turns: int = 10
 ) -> tuple[str, Optional[str]]:
     """
-    Execute Claude Code in headless mode.
+    Execute Claude Code in headless mode (async).
 
     Uses --output-format json for reliable structured output.
-    Pattern validated in test_integration.py.
 
     Args:
         prompt: The prompt to send
         working_dir: Directory to run from (for CLAUDE.md context)
         model: Model to use ('haiku', 'sonnet', 'opus')
-        allowed_tools: Comma-separated tools (--tools flag restricts available tools)
+        allowed_tools: Comma-separated tools
         timeout: Max seconds to wait
         session_id: Optional session ID to resume
         max_turns: Max agentic turns (cost control)
@@ -249,13 +403,11 @@ def call_claude_code(
     Returns:
         (response_text, session_id)
     """
-    # Log model usage
     if model == 'opus':
         logger.warning(f"[$$$ OPUS $$$] Calling Opus (tools: {allowed_tools})")
     else:
         logger.info(f"[CLAUDE] Calling {model}...")
 
-    # Build command
     cmd = [
         _claude_path,
         "-p", prompt,
@@ -271,24 +423,17 @@ def call_claude_code(
         cmd.extend(["--resume", session_id])
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(working_dir)
+        returncode, stdout, stderr = await run_subprocess_async(
+            cmd, timeout=timeout, cwd=str(working_dir)
         )
 
-        # Log completion
-        logger.info(f"[CLAUDE] {model} finished (rc={result.returncode})")
+        logger.info(f"[CLAUDE] {model} finished (rc={returncode})")
 
-        # Check for errors
-        if result.returncode != 0:
-            logger.error(f"[CLAUDE ERROR] {result.stderr[:500] if result.stderr else 'No stderr'}")
-            return f"Error (rc={result.returncode}): {result.stderr[:200] if result.stderr else 'Unknown error'}", session_id
+        if returncode != 0:
+            logger.error(f"[CLAUDE ERROR] {stderr[:500] if stderr else 'No stderr'}")
+            return f"Error (rc={returncode}): {stderr[:200] if stderr else 'Unknown error'}", session_id
 
-        # Parse JSON output (array format per Claude Code docs)
-        output = result.stdout.strip()
+        output = stdout.strip()
         if not output:
             logger.warning("[CLAUDE] Empty output")
             return "No response from Claude", session_id
@@ -301,22 +446,18 @@ def call_claude_code(
             if isinstance(data_list, list):
                 for item in data_list:
                     if isinstance(item, dict):
-                        # Capture session_id
                         if 'session_id' in item:
                             new_session_id = item['session_id']
-                        # Capture result
                         if item.get('type') == 'result' and 'result' in item:
                             response_text = item['result']
             else:
-                # Single object response
                 if 'session_id' in data_list:
                     new_session_id = data_list['session_id']
                 if 'result' in data_list:
                     response_text = data_list['result']
 
-        except json.JSONDecodeError as e:
-            # Not JSON - treat as plain text response
-            logger.warning(f"[CLAUDE] Output not JSON, using as plain text")
+        except json.JSONDecodeError:
+            logger.warning("[CLAUDE] Output not JSON, using as plain text")
             response_text = output
 
         if new_session_id and new_session_id != session_id:
@@ -325,7 +466,7 @@ def call_claude_code(
         return response_text or "No response from Claude", new_session_id
 
     except subprocess.TimeoutExpired:
-        logger.error(f"[TIMEOUT] Claude exceeded {timeout}s")
+        logger.error(f"[TIMEOUT] Claude exceeded {timeout}s (killed)")
         return f"Request timed out after {timeout}s", session_id
 
     except Exception as e:
@@ -333,7 +474,7 @@ def call_claude_code(
         return f"Error: {e}", session_id
 
 
-def handle_message_tiered(
+async def handle_message_tiered(
     message: str,
     status_lines: list[str],
     conversation: list[dict],
@@ -343,38 +484,24 @@ def handle_message_tiered(
     opus_session_id: Optional[str] = None
 ) -> tuple[str, str, Optional[str], Optional[str]]:
     """
-    Handle a message using tiered model approach.
+    Handle a message using tiered model approach (async).
 
     1. Try Sonnet with read-only tools
     2. If Sonnet needs action, escalate to Opus
 
-    CLAUDE.md (auto-loaded) provides personality and system knowledge.
-    Prompt provides: message, conversation, status, and ops-log (working memory).
-
     Returns:
         (response, model_used, sonnet_session_id, opus_session_id)
     """
-    # Format recent conversation
-    convo_text = ""
-    if conversation:
-        recent = conversation[-5:]  # Last 5 messages for context
-        convo_text = "\n".join([f"- {m['text'][:100]}" for m in recent])
-
-    # Format live status
-    status_text = "\n".join([f"- {line}" for line in status_lines])
-
-    # Just the message - CLAUDE.md handles everything
     sonnet_prompt = message
 
-    # Try Sonnet first (read-only observer, limited turns)
-    response, sonnet_session_id = call_claude_code(
+    response, sonnet_session_id = await call_claude_code(
         prompt=sonnet_prompt,
         working_dir=project_path,
         model='sonnet',
         allowed_tools='Read,Glob,Grep',
         timeout=60,
         session_id=sonnet_session_id,
-        max_turns=5  # Observer doesn't need many turns
+        max_turns=5
     )
 
     # Check for escalation
@@ -383,11 +510,8 @@ def handle_message_tiered(
         reason = response.split(':', 1)[1].strip() if ':' in response else 'Action required'
         logger.info(f"[$$$ OPUS $$$] Escalating: {reason}")
 
-        # Just the message - CLAUDE.md handles everything
-        opus_prompt = message
-
-        response, opus_session_id = call_claude_code(
-            prompt=opus_prompt,
+        response, opus_session_id = await call_claude_code(
+            prompt=message,
             working_dir=project_path,
             model='opus',
             allowed_tools='Read,Edit,Write,Bash,Glob,Grep',
@@ -466,6 +590,10 @@ class Orchestrator:
         self.proactive_alerts = config.get('proactive_alerts', True)
         self.use_tiered_models = config.get('use_tiered_models', True)
 
+        # Set module-level OpenRouter API key for balance checking
+        global _openrouter_api_key
+        _openrouter_api_key = config.get('openrouter', {}).get('api_key')
+
         # State
         self.processed_timestamps: set = set()
         self.message_buffer: list[dict] = []
@@ -517,17 +645,16 @@ class Orchestrator:
         self._set_running_marker()
 
         try:
-            # Run signal polling and health monitoring as INDEPENDENT tasks
+            # Run signal polling, health monitoring, and cleanup as INDEPENDENT tasks
             # They don't block each other
             await asyncio.gather(
                 self._signal_loop(),
                 self._monitoring_loop(),
+                self._cleanup_loop(),
             )
         finally:
-            # Clean shutdown - notify and remove marker
+            # Clean shutdown - remove marker, skip message (can block if signal-cli hung)
             logger.info("Shutting down...")
-            for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, "SUNFISH offline (clean shutdown)")
             self._clear_running_marker()
             self.memory.add_event("Clean shutdown")
 
@@ -553,9 +680,45 @@ class Orchestrator:
                 logger.error(f"[MONITOR LOOP] Error: {e}")
             await asyncio.sleep(health_check_interval)
 
+    async def _cleanup_loop(self):
+        """
+        Independent loop for temp folder cleanup (Windows only).
+
+        Cleans up orphaned libsignal temp folders that can accumulate
+        if the java.library.path fix stops working.
+
+        Runs hourly by default. If folders are found, logs a warning
+        as early detection that the permanent fix needs attention.
+        """
+        # Configurable interval (default 1 hour)
+        cleanup_interval = self.config.get('temp_cleanup_interval', 3600)
+
+        # Skip if disabled (interval <= 0)
+        if cleanup_interval <= 0:
+            logger.info("[CLEANUP LOOP] Disabled (temp_cleanup_interval <= 0)")
+            return
+
+        logger.info(f"[CLEANUP LOOP] Started (interval: {cleanup_interval}s)")
+
+        # Run once at startup to catch any existing accumulation
+        cleanup_libsignal_temp_folders()
+
+        while True:
+            await asyncio.sleep(cleanup_interval)
+            try:
+                result = cleanup_libsignal_temp_folders()
+                if result['warning']:
+                    # Also log to memory for visibility
+                    self.memory.add_event(
+                        f"Cleanup warning: found {result['checked']} libsignal temp folders, "
+                        f"deleted {result['deleted']}. Check java.library.path fix."
+                    )
+            except Exception as e:
+                logger.error(f"[CLEANUP LOOP] Error: {e}")
+
     async def _process_messages(self):
         """Process incoming Signal messages."""
-        messages = self.signal.receive_messages()
+        messages = await self.signal.receive_messages()
 
         for msg in messages:
             envelope = msg.get('envelope', msg)
@@ -577,7 +740,7 @@ class Orchestrator:
                 group_id = group_info.get('groupId', 'none')
                 text = data_msg.get('message', '')
                 if text:
-                    logger.info(f"[SKIP] group={group_id[:20] if group_id else 'DM'}... not in allowed list or no text")
+                    logger.debug(f"[SKIP] group={group_id[:20] if group_id else 'DM'}... not in allowed list or no text")
                 continue
 
             group_id, sender, message_text, mentions = parsed
@@ -598,7 +761,7 @@ class Orchestrator:
             has_trigger_word = self.trigger_word and self.trigger_word in message_text.lower()
 
             if not has_mention and not has_trigger_word:
-                logger.info(f"[SKIP] no mention and no trigger word '{self.trigger_word}'")
+                logger.debug(f"[SKIP] no mention and no trigger word '{self.trigger_word}'")
                 continue
 
             logger.info(f"[TRIGGERED] {'@opus direct' if direct_opus else 'via ' + ('mention' if has_mention else 'trigger word')}")
@@ -612,18 +775,8 @@ class Orchestrator:
                 # Direct Opus access - bypass Sonnet entirely
                 logger.info("[$$$ OPUS $$$] Direct Opus request")
 
-                # Format conversation
-                convo_text = ""
-                if self.message_buffer:
-                    recent = self.message_buffer[-5:]
-                    convo_text = "\n".join([f"- {m['text'][:100]}" for m in recent])
-
-                status_text = "\n".join([f"- {line}" for line in status_lines])
-
-                prompt = message_text
-
-                response, self.opus_session_id = call_claude_code(
-                    prompt=prompt,
+                response, self.opus_session_id = await call_claude_code(
+                    prompt=message_text,
                     working_dir=self.project_path,
                     model='opus',
                     allowed_tools='Read,Edit,Write,Bash,Glob,Grep',
@@ -632,32 +785,30 @@ class Orchestrator:
                 )
                 self._save_sessions()
                 model_used = 'opus'
-                # Don't schedule verification for user queries - only for auto-recovery
 
             elif self.use_tiered_models:
                 # Tiered: Sonnet first, escalate to Opus if needed
-                response, model_used, self.sonnet_session_id, self.opus_session_id = handle_message_tiered(
+                response, model_used, self.sonnet_session_id, self.opus_session_id = await handle_message_tiered(
                     message_text, status_lines, self.message_buffer, ops_log, self.project_path,
                     sonnet_session_id=self.sonnet_session_id,
                     opus_session_id=self.opus_session_id
                 )
                 self._save_sessions()
                 logger.info(f"Handled by {model_used}")
-                # Don't schedule verification for user queries - only for auto-recovery
             else:
                 # Legacy: always use Opus
-                response, self.opus_session_id = call_claude_code(
+                response, self.opus_session_id = await call_claude_code(
                     message_text, self.project_path, session_id=self.opus_session_id
                 )
                 self._save_sessions()
                 model_used = 'opus'
 
-            # Log event (Opus logs its own actions to opus-scratch.md)
+            # Log event
             self.memory.add_event(f"Responded to: {message_text[:50]}...")
 
             # Send response with model attribution
             tagged_response = f"{response}\n\n— {model_used}"
-            self.signal.send_message(group_id, tagged_response)
+            await self.signal.send_message(group_id, tagged_response)
 
     async def _smart_monitoring_check(self):
         """Event-driven monitoring - only invoke Claude when interesting."""
@@ -689,15 +840,12 @@ class Orchestrator:
     async def _sonnet_observation(self, reason: str, changed_metrics: list[str]):
         """Have Sonnet observe the system and report if needed."""
         change_summary = self.smart_monitor.get_change_summary(changed_metrics)
-        status_lines = self._get_status_lines()
-        status_text = "\n".join([f"- {line}" for line in status_lines])
-        ops_log = self.memory.get_context_for_claude()
 
         prompt = f"""System check-in. Changes: {change_summary}
 
 If all good, say "All clear." Only message if something's off."""
 
-        response, self.sonnet_session_id = call_claude_code(
+        response, self.sonnet_session_id = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
@@ -710,7 +858,6 @@ If all good, say "All clear." Only message if something's off."""
 
         response_lower = response.lower().strip()
 
-        # Log observation
         if 'all clear' in response_lower:
             logger.info("Sonnet: All clear")
             return
@@ -719,23 +866,18 @@ If all good, say "All clear." Only message if something's off."""
         if response_lower.startswith('alert:'):
             self.memory.add_event(f"Alert: {response[:200]}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
+                await self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
         else:
-            # Non-critical observation
             self.memory.add_event(f"Observation: {response[:200]}")
             logger.info(f"Sonnet observation: {response}")
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"{response}\n\n— sonnet")
+                await self.signal.send_message(group_id, f"{response}\n\n— sonnet")
 
     async def _verification_check(self, status: dict):
         """Verify that a recent Opus fix worked."""
-        status_lines = self._get_status_lines()
-        status_text = "\n".join([f"- {line}" for line in status_lines])
-        ops_log = self.memory.get_context_for_claude()
-
         prompt = """Opus just made a fix. Did it work? Say "Fix verified" or "ALERT: still broken"."""
 
-        response, self.sonnet_session_id = call_claude_code(
+        response, self.sonnet_session_id = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
@@ -748,10 +890,9 @@ If all good, say "All clear." Only message if something's off."""
 
         self.memory.add_event(f"Verification: {response[:200]}")
 
-        # Alert if fix failed
         if 'alert:' in response.lower():
             for group_id in self.signal.allowed_group_ids:
-                self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
+                await self.signal.send_message(group_id, f"🚨 {response}\n\n— sonnet")
 
     async def _startup_check(self):
         """
@@ -799,7 +940,7 @@ If all good, say "All clear." Only message if something's off."""
 
         # Send to all groups
         for group_id in self.signal.allowed_group_ids:
-            self.signal.send_message(group_id, message)
+            await self.signal.send_message(group_id, message)
 
         # Log the startup appropriately
         if is_crash_recovery:
@@ -853,22 +994,9 @@ If all good, say "All clear." Only message if something's off."""
         """Have Sonnet analyze what might have caused the crash."""
         logger.info("Analyzing potential crash cause...")
 
-        # Read orchestrator log if it exists
-        log_path = self.project_path / "logs" / "orchestrator.log"
-        log_tail = ""
-        if log_path.exists():
-            try:
-                with open(log_path, 'r') as f:
-                    lines = f.readlines()
-                    log_tail = ''.join(lines[-50:])  # Last 50 lines
-            except Exception:
-                pass
-
-        ops_log = self.memory.get_context_for_claude()
-
         prompt = """System crashed and restarted. Quick take - what happened?"""
 
-        response, self.sonnet_session_id = call_claude_code(
+        response, self.sonnet_session_id = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='sonnet',
@@ -879,11 +1007,9 @@ If all good, say "All clear." Only message if something's off."""
         )
         self._save_sessions()
 
-        # Log the analysis
         logger.info(f"Crash analysis: {response}")
         self.memory.add_event(f"Crash analysis: {response[:250]}")
 
-        # If Sonnet found something actionable, add to history
         if 'unknown' not in response.lower():
             self.memory.add_to_history(f"Crash on {datetime.now().strftime('%m/%d')}: {response[:150]}")
 
@@ -894,16 +1020,13 @@ If all good, say "All clear." Only message if something's off."""
         """
         logger.info("Attempting auto-recovery...")
 
-        status_lines = self._get_status_lines()
-        status_text = "\n".join([f"- {line}" for line in status_lines])
         alerts_text = "\n".join([f"- {a}" for a in alerts])
-        ops_log = self.memory.get_context_for_claude()
 
         prompt = f"""System restarted with issues: {alerts_text}
 
 Fix what you can and let us know what you did."""
 
-        response, self.opus_session_id = call_claude_code(
+        response, self.opus_session_id = await call_claude_code(
             prompt=prompt,
             working_dir=self.project_path,
             model='opus',
@@ -913,13 +1036,11 @@ Fix what you can and let us know what you did."""
         )
         self._save_sessions()
 
-        # Log and notify
         self.memory.add_event(f"Auto-recovery: {response[:200]}")
 
         for group_id in self.signal.allowed_group_ids:
-            self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}\n\n— opus")
+            await self.signal.send_message(group_id, f"🔧 Auto-recovery:\n{response}\n\n— opus")
 
-        # Schedule verification
         self.smart_monitor.schedule_verification()
 
     def _get_status_lines(self) -> list[str]:
@@ -957,9 +1078,50 @@ Fix what you can and let us know what you did."""
 # =============================================================================
 
 def main():
+    """
+    Main entry point with graceful shutdown handling.
+
+    - First Ctrl+C: Attempts graceful shutdown (5 second timeout)
+    - Second Ctrl+C or timeout: Forces immediate exit
+    """
     config = load_config()
     orchestrator = Orchestrator(config)
-    asyncio.run(orchestrator.run())
+
+    # Track if we're already shutting down
+    shutting_down = False
+
+    def force_exit():
+        """Force exit after timeout."""
+        logger.warning("Shutdown timeout - forcing exit")
+        os._exit(1)
+
+    def handle_interrupt():
+        """Handle Ctrl+C with timeout."""
+        nonlocal shutting_down
+        if shutting_down:
+            # Second interrupt - force exit
+            logger.warning("Second interrupt - forcing immediate exit")
+            os._exit(1)
+
+        shutting_down = True
+        logger.info("Shutting down (Ctrl+C again to force)...")
+
+        # Schedule force exit after 5 seconds
+        import threading
+        timer = threading.Timer(5.0, force_exit)
+        timer.daemon = True
+        timer.start()
+
+    try:
+        asyncio.run(orchestrator.run())
+    except KeyboardInterrupt:
+        handle_interrupt()
+        # Give the finally block a chance to run
+        try:
+            # Brief pause for cleanup
+            pass
+        except KeyboardInterrupt:
+            force_exit()
 
 
 if __name__ == "__main__":

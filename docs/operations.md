@@ -22,6 +22,13 @@ PowerShell wrapper auto-restarts on crash:
 - Max 10 restarts before giving up
 - Logs to `logs/orchestrator.log`
 
+### Stopping the Orchestrator
+- First Ctrl+C: Graceful shutdown (5 second timeout)
+- Second Ctrl+C: Force immediate exit
+- If shutdown hangs for 5 seconds, auto-force exits
+
+Architecture uses async subprocess calls, so Ctrl+C propagates cleanly to child processes (signal-cli, claude).
+
 ## Manual Commands
 
 ```powershell

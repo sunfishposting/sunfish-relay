@@ -92,7 +92,6 @@ def test_ops_log_structure():
         '## Current Status',
         '## Active Issues',
         '## Recent Events',
-        '## Recent Actions by Opus',
         '## History Summary',
         '## Standing Instructions'
     ]

@@ -116,6 +116,12 @@ Create `.claude/settings.local.json` in the repo:
 }
 ```
 
+Also add your API key to `config/settings.yaml` for balance monitoring:
+```yaml
+openrouter:
+  api_key: "sk-or-v1-YOUR-KEY"
+```
+
 ### 8. Run
 
 ```powershell
