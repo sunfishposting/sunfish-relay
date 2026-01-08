@@ -30,20 +30,20 @@ def check_openrouter_balance() -> Optional[float]:
     """Check OpenRouter credit balance. Returns remaining credits or None on error."""
     api_key = os.environ.get('OPENROUTER_API_KEY')
     if not api_key:
-        return None
+        return None  # No key, skip silently
     try:
         resp = requests.get(
             'https://openrouter.ai/api/v1/credits',
             headers={'Authorization': f'Bearer {api_key}'},
-            timeout=5
+            timeout=(2, 5)  # (connect timeout, read timeout)
         )
         if resp.status_code == 200:
             data = resp.json().get('data', {})
             total = data.get('total_credits', 0)
             used = data.get('total_usage', 0)
             return total - used
-    except Exception as e:
-        logger.warning(f"Failed to check OpenRouter balance: {e}")
+    except:
+        pass  # Silently skip any errors - balance check is non-critical
     return None
 
 
@@ -358,7 +358,9 @@ OPS LOG:
 {ops_log}
 
 ---
-Read-only mode. If this needs ACTION (edit, restart, fix), respond: ESCALATE: <reason>"""
+You are READ-ONLY. You can ONLY observe (Read, Glob, Grep). You CANNOT execute commands, restart services, or make changes.
+If user asks for ANY action, you MUST respond exactly: ESCALATE: <what they want>
+Do NOT pretend to do things you cannot do."""
 
     # Try Sonnet first
     response, sonnet_session_id = call_claude_code(
