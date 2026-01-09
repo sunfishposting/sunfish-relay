@@ -38,6 +38,14 @@ class OBSMonitor(BaseMonitor):
         if not HAS_WEBSOCKET:
             return False
 
+        # Clean up any existing connection first
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
         try:
             self._ws = websocket.create_connection(
                 f"ws://{self.host}:{self.port}",
@@ -78,6 +86,13 @@ class OBSMonitor(BaseMonitor):
                     self._connected = True
                     return True
         except Exception:
+            # Clean up on failure to prevent socket leak
+            if self._ws:
+                try:
+                    self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
             self._connected = False
         return False
 
@@ -195,8 +210,8 @@ class OBSMonitor(BaseMonitor):
         if self._ws:
             self._ws.send(json.dumps(data))
 
-    def _request(self, request_type: str, data: dict = None) -> dict:
-        """Send request and get response."""
+    def _request(self, request_type: str, data: dict = None, timeout: float = 10.0) -> dict:
+        """Send request and get response with timeout protection."""
         self._message_id += 1
 
         request = {
@@ -210,12 +225,25 @@ class OBSMonitor(BaseMonitor):
 
         self._send(request)
 
-        while True:
-            response = json.loads(self._ws.recv())
-            if response.get('op') == 7:  # RequestResponse
-                resp_data = response.get('d', {})
-                if resp_data.get('requestId') == str(self._message_id):
-                    if resp_data.get('requestStatus', {}).get('result'):
-                        return resp_data.get('responseData', {})
-                    else:
-                        raise Exception(resp_data.get('requestStatus', {}).get('comment', 'Unknown error'))
+        # Set socket timeout for recv operations
+        original_timeout = self._ws.gettimeout()
+        self._ws.settimeout(timeout)
+
+        try:
+            max_attempts = 10  # Safety valve: don't loop forever
+            for _ in range(max_attempts):
+                response = json.loads(self._ws.recv())
+                if response.get('op') == 7:  # RequestResponse
+                    resp_data = response.get('d', {})
+                    if resp_data.get('requestId') == str(self._message_id):
+                        if resp_data.get('requestStatus', {}).get('result'):
+                            return resp_data.get('responseData', {})
+                        else:
+                            raise Exception(resp_data.get('requestStatus', {}).get('comment', 'Unknown error'))
+            raise Exception(f"No response after {max_attempts} messages")
+        finally:
+            # Restore original timeout
+            try:
+                self._ws.settimeout(original_timeout)
+            except Exception:
+                pass
