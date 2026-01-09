@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,9 @@ from typing import Optional
 
 import requests
 import yaml
+
+# Thread lock for session file operations (prevents corruption on concurrent writes)
+_session_file_lock = threading.Lock()
 
 
 # =============================================================================
@@ -101,9 +105,26 @@ async def run_subprocess_async(
 # Module-level API key (set by Orchestrator from config)
 _openrouter_api_key: Optional[str] = None
 
+# Balance cache to prevent rate limiting (TTL in seconds)
+_balance_cache: dict = {'value': None, 'timestamp': 0}
+_balance_cache_ttl: float = 60.0  # Cache for 60 seconds
 
-def check_openrouter_balance() -> Optional[float]:
-    """Check OpenRouter credit balance. Returns remaining credits or None on error."""
+
+def check_openrouter_balance(force_refresh: bool = False) -> Optional[float]:
+    """
+    Check OpenRouter credit balance with caching.
+
+    Returns remaining credits or None on error.
+    Results are cached for 60 seconds to prevent rate limiting.
+    """
+    global _balance_cache
+
+    # Check cache first (unless force refresh)
+    if not force_refresh:
+        cache_age = time.time() - _balance_cache['timestamp']
+        if cache_age < _balance_cache_ttl and _balance_cache['value'] is not None:
+            return _balance_cache['value']
+
     # Use module-level key (from config) or env var
     api_key = _openrouter_api_key or os.environ.get('OPENROUTER_API_KEY')
     if not api_key:
@@ -112,7 +133,7 @@ def check_openrouter_balance() -> Optional[float]:
 
     # Log key format for debugging (first 10 chars only)
     key_preview = api_key[:10] + "..." if len(api_key) > 10 else api_key
-    logger.debug(f"[OPENROUTER] Using key: {key_preview}")
+    logger.debug(f"[OPENROUTER] Checking balance (key: {key_preview})")
 
     try:
         resp = requests.get(
@@ -124,12 +145,19 @@ def check_openrouter_balance() -> Optional[float]:
             data = resp.json().get('data', {})
             total = data.get('total_credits', 0)
             used = data.get('total_usage', 0)
-            return total - used
+            balance = total - used
+
+            # Update cache
+            _balance_cache = {'value': balance, 'timestamp': time.time()}
+            return balance
+        elif resp.status_code == 429:
+            logger.warning("[OPENROUTER] Rate limited - using cached value")
+            return _balance_cache.get('value')
         else:
             logger.warning(f"[OPENROUTER] API returned {resp.status_code}: {resp.text[:100]}")
     except Exception as e:
         logger.debug(f"[OPENROUTER] Error: {e}")
-    return None
+    return _balance_cache.get('value')  # Return stale cache on error
 
 
 def strip_markdown(text: str) -> str:
@@ -269,66 +297,96 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 class SignalCLINative:
-    """Native signal-cli client."""
+    """Native signal-cli client with retry logic."""
 
     def __init__(self, signal_cli_path: str = "signal-cli"):
         self.phone_number: Optional[str] = None
         self.allowed_group_ids: set[str] = set()
         self.signal_cli_path = signal_cli_path
+        self._consecutive_failures = 0
+        self._max_retries = 3
+        self._base_backoff = 2.0  # seconds
 
     def configure(self, phone_number: str, allowed_group_ids: list[str]):
         self.phone_number = phone_number
         self.allowed_group_ids = set(allowed_group_ids)
 
     async def receive_messages(self) -> list[dict]:
-        """Poll for new messages using signal-cli (async)."""
-        try:
-            cmd = [self.signal_cli_path, "-u", self.phone_number, "--output", "json", "receive"]
-            logger.debug("[POLL] Starting receive...")
+        """Poll for new messages using signal-cli with retry and exponential backoff."""
+        cmd = [self.signal_cli_path, "-u", self.phone_number, "--output", "json", "receive"]
 
-            returncode, stdout, stderr = await run_subprocess_async(cmd, timeout=15)
+        for attempt in range(self._max_retries + 1):
+            try:
+                logger.debug(f"[POLL] Starting receive (attempt {attempt + 1})...")
 
-            if stderr:
-                logger.warning(f"[POLL] signal-cli stderr: {stderr[:200]}")
+                returncode, stdout, stderr = await run_subprocess_async(cmd, timeout=15)
 
-            if returncode != 0:
-                logger.warning(f"[POLL] signal-cli returned {returncode}")
+                if stderr:
+                    logger.warning(f"[POLL] signal-cli stderr: {stderr[:200]}")
 
-            messages = []
-            raw_output = stdout.strip()
-
-            if raw_output:
-                logger.debug(f"[POLL] Received {len(raw_output)} bytes")
-
-            for line in raw_output.split('\n'):
-                if line:
-                    try:
-                        msg = json.loads(line)
-                        messages.append(msg)
-                        env = msg.get('envelope', msg)
-                        data_msg = env.get('dataMessage', {})
-                        text = data_msg.get('message', '')
-                        group_info = data_msg.get('groupInfo', {})
-                        group = group_info.get('groupId', 'DM')
-                        sender = env.get('source', 'unknown')
-
-                        if text:
-                            logger.info(f"[RAW MSG] from={sender} group={group[:20] if group != 'DM' else 'DM'}... text={text[:100]}")
-                        else:
-                            msg_type = 'receipt' if env.get('receiptMessage') else 'typing' if env.get('typingMessage') else 'other'
-                            logger.debug(f"[RAW {msg_type.upper()}] from={sender}")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"[POLL] JSON decode error: {e} - line: {line[:100]}")
+                if returncode != 0:
+                    logger.warning(f"[POLL] signal-cli returned {returncode}")
+                    # Non-zero return could be transient, retry
+                    if attempt < self._max_retries:
+                        backoff = self._base_backoff * (2 ** attempt)
+                        logger.info(f"[POLL] Retrying in {backoff:.1f}s...")
+                        await asyncio.sleep(backoff)
                         continue
 
-            logger.debug(f"[POLL] Parsed {len(messages)} messages")
-            return messages
-        except subprocess.TimeoutExpired:
-            logger.warning("[POLL] signal-cli timed out (killed) - will retry next cycle")
-            return []
-        except Exception as e:
-            logger.error(f"[POLL] Failed to receive messages: {e}")
-            return []
+                # Success - reset failure counter
+                self._consecutive_failures = 0
+
+                messages = []
+                raw_output = stdout.strip()
+
+                if raw_output:
+                    logger.debug(f"[POLL] Received {len(raw_output)} bytes")
+
+                for line in raw_output.split('\n'):
+                    if line:
+                        try:
+                            msg = json.loads(line)
+                            messages.append(msg)
+                            env = msg.get('envelope', msg)
+                            data_msg = env.get('dataMessage', {})
+                            text = data_msg.get('message', '')
+                            group_info = data_msg.get('groupInfo', {})
+                            group = group_info.get('groupId', 'DM')
+                            sender = env.get('source', 'unknown')
+
+                            if text:
+                                logger.info(f"[RAW MSG] from={sender} group={group[:20] if group != 'DM' else 'DM'}... text={text[:100]}")
+                            else:
+                                msg_type = 'receipt' if env.get('receiptMessage') else 'typing' if env.get('typingMessage') else 'other'
+                                logger.debug(f"[RAW {msg_type.upper()}] from={sender}")
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[POLL] JSON decode error: {e} - line: {line[:100]}")
+                            continue
+
+                logger.debug(f"[POLL] Parsed {len(messages)} messages")
+                return messages
+
+            except subprocess.TimeoutExpired:
+                self._consecutive_failures += 1
+                if attempt < self._max_retries:
+                    backoff = self._base_backoff * (2 ** attempt)
+                    logger.warning(f"[POLL] signal-cli timed out, retrying in {backoff:.1f}s (failure {self._consecutive_failures})...")
+                    await asyncio.sleep(backoff)
+                else:
+                    logger.error(f"[POLL] signal-cli timed out after {self._max_retries + 1} attempts")
+                    return []
+
+            except Exception as e:
+                self._consecutive_failures += 1
+                if attempt < self._max_retries:
+                    backoff = self._base_backoff * (2 ** attempt)
+                    logger.warning(f"[POLL] Error: {e}, retrying in {backoff:.1f}s (failure {self._consecutive_failures})...")
+                    await asyncio.sleep(backoff)
+                else:
+                    logger.error(f"[POLL] Failed after {self._max_retries + 1} attempts: {e}")
+                    return []
+
+        return []  # Should not reach here, but safety fallback
 
     async def send_message(self, group_id: str, message: str):
         """Send a message to a group via stdin (async)."""
@@ -385,7 +443,7 @@ async def call_claude_code(
     timeout: int = 600,
     session_id: Optional[str] = None,
     max_turns: int = 10
-) -> tuple[str, Optional[str]]:
+) -> tuple[str, Optional[str], str]:
     """
     Execute Claude Code in headless mode (async).
 
@@ -401,7 +459,7 @@ async def call_claude_code(
         max_turns: Max agentic turns (cost control)
 
     Returns:
-        (response_text, session_id)
+        (response_text, session_id, tool_summary) - tool_summary is comma-separated tool:count pairs
     """
     if model == 'opus':
         logger.warning(f"[$$$ OPUS $$$] Calling Opus (tools: {allowed_tools})")
@@ -618,6 +676,9 @@ class Orchestrator:
         self.message_buffer: list[dict] = []
         self.buffer_size = config.get('context_buffer_size', 30)
 
+        # Shutdown coordination
+        self._shutdown_event = asyncio.Event()
+
         # Persistent state file (sessions + processed timestamps)
         self.session_file = self.project_path / ".sessions.json"
         self.sonnet_session_id, self.opus_session_id, self.processed_timestamps = self._load_sessions()
@@ -637,19 +698,30 @@ class Orchestrator:
         return None, None, set()
 
     def _save_sessions(self):
-        """Persist session IDs and processed timestamps to disk."""
-        try:
-            # Keep only last 500 timestamps to prevent file bloat
-            timestamps_list = list(self.processed_timestamps)[-500:]
-            with open(self.session_file, 'w') as f:
-                json.dump({
+        """Persist session IDs and processed timestamps to disk (atomic, thread-safe)."""
+        with _session_file_lock:
+            try:
+                # Keep only last 500 timestamps to prevent file bloat
+                timestamps_list = list(self.processed_timestamps)[-500:]
+                data = {
                     'sonnet': self.sonnet_session_id,
                     'opus': self.opus_session_id,
                     'processed_timestamps': timestamps_list,
                     'updated': datetime.now().isoformat()
-                }, f)
-        except Exception as e:
-            logger.warning(f"Could not save sessions: {e}")
+                }
+
+                # Atomic write: write to temp file, then rename
+                # This prevents corruption if write is interrupted
+                temp_path = self.session_file.with_suffix('.tmp')
+                with open(temp_path, 'w') as f:
+                    json.dump(data, f)
+
+                # On Windows, need to remove target first
+                if self.session_file.exists():
+                    self.session_file.unlink()
+                temp_path.rename(self.session_file)
+            except Exception as e:
+                logger.warning(f"Could not save sessions: {e}")
 
     async def run(self):
         """Main entry point - runs signal and monitoring as independent tasks."""
@@ -676,33 +748,61 @@ class Orchestrator:
                 self._monitoring_loop(),
                 self._cleanup_loop(),
             )
+        except asyncio.CancelledError:
+            logger.info("Tasks cancelled - shutting down gracefully")
         finally:
+            # Signal all loops to stop
+            self._shutdown_event.set()
+
             # Clean shutdown - remove marker, skip message (can block if signal-cli hung)
             logger.info("Shutting down...")
             self._clear_running_marker()
             self.memory.add_event("Clean shutdown")
 
+    def request_shutdown(self):
+        """Request graceful shutdown of all loops."""
+        self._shutdown_event.set()
+
+    async def _sleep_or_shutdown(self, seconds: float) -> bool:
+        """
+        Sleep for specified seconds, but wake early if shutdown is requested.
+
+        Returns True if shutdown was requested, False if sleep completed normally.
+        """
+        try:
+            await asyncio.wait_for(
+                self._shutdown_event.wait(),
+                timeout=seconds
+            )
+            return True  # Shutdown requested
+        except asyncio.TimeoutError:
+            return False  # Normal sleep completed
+
     async def _signal_loop(self):
         """Independent loop for Signal message polling."""
         logger.info("[SIGNAL LOOP] Started")
-        while True:
+        while not self._shutdown_event.is_set():
             try:
                 await self._process_messages()
             except Exception as e:
                 logger.error(f"[SIGNAL LOOP] Error: {e}")
-            await asyncio.sleep(self.poll_interval)
+            if await self._sleep_or_shutdown(self.poll_interval):
+                break
+        logger.info("[SIGNAL LOOP] Stopped")
 
     async def _monitoring_loop(self):
         """Independent loop for health monitoring."""
         logger.info("[MONITOR LOOP] Started")
         # Now independent from signal polling - can run frequently
         health_check_interval = self.config.get('health_check_interval', 10)
-        while True:
+        while not self._shutdown_event.is_set():
             try:
                 await self._smart_monitoring_check()
             except Exception as e:
                 logger.error(f"[MONITOR LOOP] Error: {e}")
-            await asyncio.sleep(health_check_interval)
+            if await self._sleep_or_shutdown(health_check_interval):
+                break
+        logger.info("[MONITOR LOOP] Stopped")
 
     async def _cleanup_loop(self):
         """
@@ -727,8 +827,9 @@ class Orchestrator:
         # Run once at startup to catch any existing accumulation
         cleanup_libsignal_temp_folders()
 
-        while True:
-            await asyncio.sleep(cleanup_interval)
+        while not self._shutdown_event.is_set():
+            if await self._sleep_or_shutdown(cleanup_interval):
+                break
             try:
                 result = cleanup_libsignal_temp_folders()
                 if result['warning']:
@@ -739,6 +840,7 @@ class Orchestrator:
                     )
             except Exception as e:
                 logger.error(f"[CLEANUP LOOP] Error: {e}")
+        logger.info("[CLEANUP LOOP] Stopped")
 
     async def _process_messages(self):
         """Process incoming Signal messages."""
@@ -843,9 +945,9 @@ class Orchestrator:
 
     async def _smart_monitoring_check(self):
         """Event-driven monitoring - only invoke Claude when interesting."""
-        # Get current status from all monitors
+        # Get current status from all monitors (non-blocking)
         logger.debug("[MONITOR] Health check running...")
-        raw_status = self.health.get_all_status()
+        raw_status = await self.health.get_all_status_async()
         logger.debug("[MONITOR] Health check complete")
         flat_status = self.smart_monitor.flatten_status(raw_status)
 
@@ -857,8 +959,8 @@ class Orchestrator:
 
         logger.info(f"Smart monitor triggered: {reason}")
 
-        # Update status in memory
-        self._update_status_in_memory()
+        # Update status in memory (non-blocking)
+        await self._update_status_in_memory_async()
 
         if reason == "verify_fix":
             # Verification check after Opus action
@@ -947,9 +1049,9 @@ If all good, say "All clear." Only message if something's off."""
         ops_log = self.memory.read()
         is_crash_recovery = self._detect_crash_recovery(ops_log)
 
-        # Get current system status
-        status = self.health.get_all_status()
-        alerts = self.health.get_all_alerts()
+        # Get current system status (non-blocking)
+        status = await self.health.get_all_status_async()
+        alerts = await self.health.get_all_alerts_async()
 
         # Build startup message
         if is_crash_recovery:
@@ -1100,7 +1202,7 @@ Fix what you can and let us know what you did."""
         return lines
 
     def _update_status_in_memory(self):
-        """Update the status section in ops-log.md."""
+        """Update the status section in ops-log.md (sync version for startup)."""
         try:
             status_lines = []
             for name, monitor in self.health.monitors.items():
@@ -1110,6 +1212,11 @@ Fix what you can and let us know what you did."""
             self.memory.update_status_section(status_text)
         except Exception as e:
             logger.error(f"Failed to update status: {e}")
+
+    async def _update_status_in_memory_async(self):
+        """Update the status section in ops-log.md (async, non-blocking)."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._update_status_in_memory)
 
 
 # =============================================================================

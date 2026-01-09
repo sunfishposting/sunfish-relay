@@ -2,11 +2,16 @@
 Health Aggregator - Collects status from all monitors and manages alerts.
 """
 
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from monitors import BaseMonitor, VPSMonitor, OBSMonitor, AgentMonitor, UnityMonitor
 
 logger = logging.getLogger(__name__)
+
+# Shared thread pool for monitor operations (prevents blocking event loop)
+_monitor_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="monitor")
 
 
 # Registry of available monitor classes
@@ -142,3 +147,26 @@ class HealthAggregator:
             return {'success': False, 'message': f"Monitor '{monitor_name}' not found"}
 
         return monitor.execute(command)
+
+    # =========================================================================
+    # Async versions (non-blocking for event loop)
+    # =========================================================================
+
+    async def get_all_status_async(self) -> dict:
+        """
+        Get status from all monitors without blocking the event loop.
+
+        Runs monitor checks in a thread pool to prevent blocking Signal polling.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_monitor_executor, self.get_all_status)
+
+    async def get_all_alerts_async(self) -> list[str]:
+        """Get alerts from all monitors without blocking the event loop."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_monitor_executor, self.get_all_alerts)
+
+    async def get_status_summary_async(self) -> str:
+        """Get formatted status summary without blocking the event loop."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_monitor_executor, self.get_status_summary)
